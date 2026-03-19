@@ -1,0 +1,29 @@
+from dotenv import load_dotenv
+import os
+
+# .env 파일에서 환경 변수 로드
+load_dotenv()
+
+# 환경변수에서 값 꺼내기
+STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
+STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
+STRAVA_WEBHOOK_VERIFY_TOKEN = os.getenv("STRAVA_WEBHOOK_VERIFY_TOKEN")
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+
+# 필수 값 없으면 서버 시작 시 바로 에러
+required = {
+    "STRAVA_CLIENT_ID": STRAVA_CLIENT_ID,
+    "STRAVA_CLIENT_SECRET": STRAVA_CLIENT_SECRET,
+    "STRAVA_WEBHOOK_VERIFY_TOKEN": STRAVA_WEBHOOK_VERIFY_TOKEN,
+    "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+    "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+    "CLAUDE_API_KEY": CLAUDE_API_KEY,
+}
+
+for key, value in required.items():
+    if not value:
+        raise ValueError(f"환경변수 {key} 가 .env 파일에 설정되어 있지 않습니다.")
