@@ -6,6 +6,7 @@ from fastapi.responses import RedirectResponse
 import app.config as config
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity
+from app.services.telegram import send_message, format_activity_message
 
 app = FastAPI(title="Running Coach AI")
 
@@ -13,11 +14,25 @@ app = FastAPI(title="Running Coach AI")
 async def startup():
     init_db()
 
+
 @app.get("/health")
 async def health():
     # 서버가 살아있는지 확인하는 엔드포인트
     # CloudFlare Tunnel 연결 테스트할 때 씀
     return {"status": "ok", "service": "running-coach-ai"}
+
+
+@app.get("/strava/login")
+async def strava_login():
+    # Strava 로그인 페이지로 리다이렉트
+    auth_url = (
+        f"https://www.strava.com/oauth/authorize"
+        f"?client_id={config.STRAVA_CLIENT_ID}"
+        f"&redirect_uri=https://legendary-treatment-keyword-amd.trycloudflare.com/strava/callback"
+        f"&response_type=code"
+        f"&scope=activity:read_all"
+    )
+    return RedirectResponse(auth_url)
 
 
 @app.get("/strava/callback")
@@ -59,19 +74,6 @@ async def verify_strava_webhook(
     return {"hub.challenge": hub_challenge}
 
 
-@app.get("/strava/login")
-async def strava_login():
-    # Strava 로그인 페이지로 리다이렉트
-    auth_url = (
-        f"https://www.strava.com/oauth/authorize"
-        f"?client_id={config.STRAVA_CLIENT_ID}"
-        f"&redirect_uri=https://legendary-treatment-keyword-amd.trycloudflare.com/strava/callback"
-        f"&response_type=code"
-        f"&scope=activity:read_all"
-    )
-    return RedirectResponse(auth_url)
-
-
 @app.post("/webhook/strava")
 async def receive_strava_event(request: Request):
     data = await request.json()
@@ -85,11 +87,16 @@ async def receive_strava_event(request: Request):
     if object_type == "activity" and aspect_type in ("update", "create"):
         print(f"새 운동 감지! ID: {activity_id}")
 
+        # 1. Strava API로 운동 상세 데이터 가져오기
         raw = await get_activity(activity_id)
         activity = parse_activity(raw)
 
-        # DB에 저장
+        # 2. DB에 저장
         save_activity(activity)
+
+        # 3. Telegram 메시지로 전송
+        message = format_activity_message(activity)
+        await send_message(message)
 
         print(f"=== 운동 분석 결과 ===")
         print(f"날짜: {activity['date']}")
@@ -111,3 +118,5 @@ async def receive_strava_event(request: Request):
         for s in activity['splits']:
             print(f"{s['km']}km: 페이스 {s['pace']} | 심박 {s['avg_heartrate']} bpm")
         print(f"====================")
+
+    return {"status": "EVENT_RECEIVED"}

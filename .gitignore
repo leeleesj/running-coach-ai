@@ -206,5 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# 환경변수
 .env
+
+# DB 데이터
 data/
