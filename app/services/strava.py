@@ -126,6 +126,7 @@ def parse_activity(raw: dict) -> dict:
         "date": start_date_formatted,
         "distance_km": distance_km,
         "moving_time": seconds_to_time(moving_time_sec),
+        "moving_time_sec": moving_time_sec,
         "pace": seconds_to_pace(average_speed),
         "max_pace": seconds_to_pace(max_speed),
         "avg_heartrate": avg_heartrate,

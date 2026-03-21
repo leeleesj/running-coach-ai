@@ -5,8 +5,13 @@ from fastapi.responses import RedirectResponse
 
 import app.config as config
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
+from app.models.database import init_db, save_activity
 
 app = FastAPI(title="Running Coach AI")
+
+@app.on_event("startup")
+async def startup():
+    init_db()
 
 @app.get("/health")
 async def health():
@@ -82,6 +87,9 @@ async def receive_strava_event(request: Request):
 
         raw = await get_activity(activity_id)
         activity = parse_activity(raw)
+
+        # DB에 저장
+        save_activity(activity)
 
         print(f"=== 운동 분석 결과 ===")
         print(f"날짜: {activity['date']}")
