@@ -28,7 +28,7 @@ async def send_message(text: str) -> bool:
     return True
 
 
-def format_activity_message(activity: dict) -> str:
+def format_activity_message(activity: dict, weather: dict = None) -> str:
     """
     파싱된 운동 데이터를 텔레그램 메시지로 포맷
 
@@ -54,11 +54,15 @@ def format_activity_message(activity: dict) -> str:
     splits_text = ""
     for s in activity.get("splits", []):
         splits_text += f"  {s['km']}km: {s['pace']} | 💓 {s['avg_heartrate']}bpm\n"
+    weather_text = ""
+    if weather:
+        weather_text = f"🌤 {weather['sky']} {weather['temperature']}°C | 습도 {weather['humidity']}% | 바람 {weather['wind_speed']}m/s"
 
     message = f"""🏃 <b>러닝 완료!</b>
 
 📅 {activity['date']}
 📍 {activity['name']}
+{weather_text}
 
 📊 <b>운동 요약</b>
 - 거리: <b>{activity['distance_km']} km</b>

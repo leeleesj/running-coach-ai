@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 
 import app.config as config
 from app.ai.claude import analyze_activity
+from app.services.weather import get_weather
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_user
 from app.services.telegram import send_message, format_activity_message
@@ -97,6 +98,18 @@ async def receive_strava_event(request: Request):
         raw = await get_activity(activity_id, athlete_id)
         activity = parse_activity(raw)
 
+        # 운동 시작 위치로 날씨 가져오기
+        start_latlng = raw.get("start_latlng", [])
+        if start_latlng:
+            weather = await get_weather(
+                lat=start_latlng[0], 
+                lon=start_latlng[1]
+            )
+        else:
+            weather = await get_weather()  # 기본 위치
+
+        print(f"날씨: {weather}")
+
         # 2. 이번 주 활동 가져오기
         weekly = await get_weekly_activities(athlete_id)
 
@@ -104,11 +117,11 @@ async def receive_strava_event(request: Request):
         save_activity(activity)
 
         # 4. Claude 분석
-        analysis = await analyze_activity(activity, weekly)
+        analysis = await analyze_activity(activity, weekly, weather)
         print(f"Claude 분석:\n{analysis}")
 
         # 5. Telegram 메시지로 전송 (기존 요약 + Claude 분석 합쳐서)
-        message = format_activity_message(activity)
+        message = format_activity_message(activity, weather)
         message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
         await send_message(message)
 
@@ -134,3 +147,10 @@ async def receive_strava_event(request: Request):
         print(f"====================")
 
     return {"status": "EVENT_RECEIVED"}
+
+
+@app.get("/test/weather")
+async def test_weather():
+    from app.services.weather import get_weather
+    weather = await get_weather()
+    return weather

@@ -2,7 +2,7 @@ import httpx
 import app.config as config
 
 
-async def analyze_activity(activity: dict, weekly_activities: list) -> str:
+async def analyze_activity(activity: dict, weekly_activities: list, weather: dict = None) -> str:
     """
     운동 데이터를 Claude API로 분석
     
@@ -18,6 +18,19 @@ async def analyze_activity(activity: dict, weekly_activities: list) -> str:
     splits_text = ""
     for s in activity.get("splits", []):
         splits_text += f"  {s['km']}km: 페이스 {s['pace']}, 심박 {s['avg_heartrate']}bpm\n"
+    
+    # 날씨 정보 텍스트 변환
+    weather_text = ""
+    if weather:
+        weather_text = f"""
+## 운동 당시 날씨
+- 기온: {weather['temperature']}°C
+- 습도: {weather['humidity']}%
+- 풍속: {weather['wind_speed']}m/s
+- 날씨: {weather['sky']} ({weather['precipitation']})
+- 강수확률: {weather['rain_probability']}%
+- 러닝 조건: {weather['running_condition']}
+"""
 
     # 프롬프트 작성
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석하고 피드백을 한국어로 제공해주세요.
@@ -37,7 +50,7 @@ async def analyze_activity(activity: dict, weekly_activities: list) -> str:
 
 ## km별 구간 데이터
 {splits_text}
-
+{weather_text}
 ## 이번 주 누적
 - 총 운동 횟수: {weekly_count}회
 - 총 거리: {round(weekly_distance, 2)}km

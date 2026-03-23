@@ -18,6 +18,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
+# 러닝 위치 (서울 동작구 기준, 나중에 Strava GPS로 자동화)
+WEATHER_NX = os.getenv("WEATHER_NX", "59")
+WEATHER_NY = os.getenv("WEATHER_NY", "124")
+
 # 필수 값 없으면 서버 시작 시 바로 에러
 required = {
     "STRAVA_CLIENT_ID": STRAVA_CLIENT_ID,
@@ -29,6 +34,7 @@ required = {
     "STRAVA_ACCESS_TOKEN": STRAVA_ACCESS_TOKEN,
     "STRAVA_REFRESH_TOKEN": STRAVA_REFRESH_TOKEN,
     "STRAVA_ATHLETE_ID": STRAVA_ATHLETE_ID,
+    "WEATHER_API_KEY": WEATHER_API_KEY,
 }
 
 for key, value in required.items():
