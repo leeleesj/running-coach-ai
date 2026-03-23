@@ -4,7 +4,8 @@ from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import RedirectResponse
 
 import app.config as config
-from app.services.strava import get_activity, parse_activity
+from app.ai.claude import analyze_activity
+from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_user
 from app.services.telegram import send_message, format_activity_message
 
@@ -96,11 +97,19 @@ async def receive_strava_event(request: Request):
         raw = await get_activity(activity_id, athlete_id)
         activity = parse_activity(raw)
 
-        # 2. DB에 저장
+        # 2. 이번 주 활동 가져오기
+        weekly = await get_weekly_activities(athlete_id)
+
+        # 3. DB에 저장
         save_activity(activity)
 
-        # 3. Telegram 메시지로 전송
+        # 4. Claude 분석
+        analysis = await analyze_activity(activity, weekly)
+        print(f"Claude 분석:\n{analysis}")
+
+        # 5. Telegram 메시지로 전송 (기존 요약 + Claude 분석 합쳐서)
         message = format_activity_message(activity)
+        message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
         await send_message(message)
 
         print(f"=== 운동 분석 결과 ===")
