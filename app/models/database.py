@@ -126,3 +126,64 @@ def save_activity(parsed: dict, user_id: int = 1) -> int:
 
     print(f"DB 저장 완료! db_id={activity_db_id}")
     return activity_db_id
+
+
+def save_user(athlete_id: int, name: str, access_token: str, 
+              refresh_token: str, expires_at: int) -> int:
+    """
+    유저 저장 또는 업데이트 (upsert)
+    OAuth 완료할 때마다 호출
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO users (
+            strava_athlete_id, name, access_token, refresh_token, token_expires_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(strava_athlete_id) DO UPDATE SET
+            access_token=excluded.access_token,
+            refresh_token=excluded.refresh_token,
+            token_expires_at=excluded.token_expires_at
+    """, (athlete_id, name, access_token, refresh_token, expires_at))
+
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
+
+    print(f"유저 저장 완료! athlete_id={athlete_id}")
+    return user_id
+
+
+def get_user(athlete_id: int) -> dict | None:
+    """유저 정보 가져오기"""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT * FROM users WHERE strava_athlete_id = ?", 
+        (athlete_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    return dict(row) if row else None
+
+
+def update_tokens(athlete_id: int, access_token: str, 
+                  refresh_token: str, expires_at: int):
+    """토큰 갱신 후 DB 업데이트"""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE users SET
+            access_token = ?,
+            refresh_token = ?,
+            token_expires_at = ?
+        WHERE strava_athlete_id = ?
+    """, (access_token, refresh_token, expires_at, athlete_id))
+
+    conn.commit()
+    conn.close()
+    print(f"토큰 갱신 완료! expires_at={expires_at}")

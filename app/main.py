@@ -4,8 +4,8 @@ from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import RedirectResponse
 
 import app.config as config
-from app.services.strava import get_activity, get_weekly_activities, parse_activity
-from app.models.database import init_db, save_activity
+from app.services.strava import get_activity, parse_activity
+from app.models.database import init_db, save_activity, save_user
 from app.services.telegram import send_message, format_activity_message
 
 app = FastAPI(title="Running Coach AI")
@@ -37,8 +37,6 @@ async def strava_login():
 
 @app.get("/strava/callback")
 async def strava_callback(code: str):
-    # Strava가 code를 가지고 콜백으로 돌아옴
-    # code → access_token 교환
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://www.strava.com/oauth/token",
@@ -50,11 +48,17 @@ async def strava_callback(code: str):
             }
         )
     token_data = response.json()
-    print(f"Access Token: {token_data.get('access_token')}")
-    print(f"Refresh Token: {token_data.get('refresh_token')}")
-    print(f"Athlete ID: {token_data.get('athlete', {}).get('id')}")
 
-    return {"message": "인증 완료!", "athlete": token_data.get('athlete', {}).get('firstname')}
+    # 유저 DB 저장 ← 추가
+    save_user(
+        athlete_id=token_data["athlete"]["id"],
+        name=token_data["athlete"]["firstname"],
+        access_token=token_data["access_token"],
+        refresh_token=token_data["refresh_token"],
+        expires_at=token_data["expires_at"],  # Unix timestamp
+    )
+
+    return {"message": "인증 완료!", "athlete": token_data["athlete"]["firstname"]}
 
 
 @app.get("/webhook/strava")
@@ -81,6 +85,7 @@ async def receive_strava_event(request: Request):
     object_type = data.get("object_type")
     aspect_type = data.get("aspect_type")
     activity_id = data.get("object_id")
+    athlete_id = data.get("owner_id")
 
     print(f"Webhook 수신: {object_type} {aspect_type} id={activity_id}")
 
@@ -88,7 +93,7 @@ async def receive_strava_event(request: Request):
         print(f"새 운동 감지! ID: {activity_id}")
 
         # 1. Strava API로 운동 상세 데이터 가져오기
-        raw = await get_activity(activity_id)
+        raw = await get_activity(activity_id, athlete_id)
         activity = parse_activity(raw)
 
         # 2. DB에 저장

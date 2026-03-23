@@ -1,37 +1,86 @@
 import httpx
+import time
+
+from app.models.database import get_user, update_tokens
 import app.config as config
 
-async def get_activity(activity_id: int) -> dict:
+async def refresh_access_token(athlete_id: int) -> str | None:
     """
-    Strava API로 운동 상세 데이터 가져오기
+    refresh_token으로 새 access_token 발급
+    만료 10분 전에 미리 갱신
+    """
+    user = get_user(athlete_id)
+    if not user:
+        print(f"유저 없음: {athlete_id}")
+        return None
+
+    # 만료 10분 전부터 갱신 (600초)
+    if user["token_expires_at"] > time.time() + 600:
+        print("토큰 아직 유효함, 갱신 불필요")
+        return user["access_token"]
+
+    print("토큰 만료 임박, 갱신 시작...")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://www.strava.com/oauth/token",
+            data={
+                "client_id": config.STRAVA_CLIENT_ID,
+                "client_secret": config.STRAVA_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": user["refresh_token"],
+            }
+        )
+
+    if response.status_code != 200:
+        print(f"토큰 갱신 실패: {response.status_code}")
+        return None
+
+    token_data = response.json()
+    new_access_token = token_data["access_token"]
+    new_refresh_token = token_data["refresh_token"]
+    new_expires_at = token_data["expires_at"]  # Unix timestamp
+
+    # DB 업데이트
+    update_tokens(athlete_id, new_access_token, new_refresh_token, new_expires_at)
+
+    return new_access_token
+
+
+async def get_activity(activity_id: int, athlete_id: int) -> dict:
+    """
+    access_token 자동 갱신 후 Strava API로 운동 상세 데이터 가져오기
+    """
+    # 토큰 갱신 확인
+    access_token = await refresh_access_token(athlete_id)
+    if not access_token:
+        return {}
     
-    acsess_token이 있어야 호출 가능
-    6시간마다 만료되므로 나중에 refresh_token 로직 추가 필요
-    """
     url = f"https://www.strava.com/api/v3/activities/{activity_id}"
 
     async with httpx.AsyncClient() as client:
         response = await client.get(
             url,
-            headers={
-                "Authorization": f"Bearer {config.STRAVA_ACCESS_TOKEN}"
-            }
+            headers={"Authorization": f"Bearer {access_token}"}
         )
 
     if response.status_code != 200:
         print(f"Strava API 에러: {response.status_code} {response.text}")
         return {}
-    
+
     return response.json()
 
-async def get_weekly_activities() -> list:
+async def get_weekly_activities(athlete_id: int) -> list:
     """
     이번 주 활동 목록 가져오기
-    after 파라미터로 이번 주 월요일 이후 활동만 필터링
     """
     from datetime import datetime, timedelta
 
-    # 이번 주 월요일 00:00 타임스탬프
+    # 토큰 갱신 확인 ← 추가
+    access_token = await refresh_access_token(athlete_id)
+    if not access_token:
+        return []
+
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())
     monday_ts = int(monday.replace(hour=0, minute=0, second=0).timestamp())
@@ -42,18 +91,18 @@ async def get_weekly_activities() -> list:
         response = await client.get(
             url,
             headers={
-                "Authorization": f"Bearer {config.STRAVA_ACCESS_TOKEN}"
+                "Authorization": f"Bearer {access_token}"  # ← config 대신 DB 토큰
             },
             params={
                 "after": monday_ts,
-                "per_page": 30  # 최대 30개 활동 가져오기
+                "per_page": 30,
             }
         )
 
     if response.status_code != 200:
         print(f"Strava API 에러: {response.status_code} {response.text}")
         return []
-    
+
     return response.json()
 
 
