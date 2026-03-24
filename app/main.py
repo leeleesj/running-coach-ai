@@ -5,7 +5,7 @@ from fastapi.responses import RedirectResponse
 
 import app.config as config
 from app.ai.claude import analyze_activity
-from app.services.weather import get_weather
+from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_user
 from app.services.telegram import send_message, format_activity_message
@@ -108,7 +108,14 @@ async def receive_strava_event(request: Request):
         else:
             weather = await get_weather()  # 기본 위치
 
-        print(f"날씨: {weather}")
+        # 심박수 보정 계산
+        hr_correction = calculate_heartrate_correction(weather)
+
+        # 실제 심박수에 보정 적용
+        if activity.get("avg_heartrate") and hr_correction["correction"]:
+            adjusted_hr = round(activity["avg_heartrate"] - hr_correction["correction"], 1)
+            hr_correction["adjusted_heartrate"] = adjusted_hr
+            print(f"심박 보정: {activity['avg_heartrate']}bpm → {adjusted_hr}bpm ({hr_correction['comment']})")
 
         # 2. 이번 주 활동 가져오기
         weekly = await get_weekly_activities(athlete_id)
@@ -117,7 +124,7 @@ async def receive_strava_event(request: Request):
         save_activity(activity)
 
         # 4. Claude 분석
-        analysis = await analyze_activity(activity, weekly, weather)
+        analysis = await analyze_activity(activity, weekly, weather, hr_correction)
         print(f"Claude 분석:\n{analysis}")
 
         # 5. Telegram 메시지로 전송 (기존 요약 + Claude 분석 합쳐서)

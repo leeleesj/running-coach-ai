@@ -202,3 +202,44 @@ def latlon_to_grid(lat: float, lon: float) -> tuple[int, int]:
     ny = int(ro - ra * math.cos(theta) + YO + 0.5)
 
     return nx, ny
+
+
+def calculate_heartrate_correction(weather: dict) -> dict:
+    """
+    날씨 기반 심박수 보정값 계산
+    
+    기준 조건: 기온 15°C, 습도 50%, 바람 0m/s
+    각 조건이 기준에서 벗어날수록 보정값 적용
+    나중에 Ollama로 대체 예정
+    """
+    temp = float(weather.get("temperature", 15))
+    humidity = int(weather.get("humidity", 50))
+    wind_speed = float(weather.get("wind_speed", 0))
+
+    # 기온 보정: 기준 15°C, 1°C당 1bpm
+    temp_correction = (temp - 15) * 1.0
+
+    # 습도 보정: 기준 50%, 10%당 1bpm
+    humidity_correction = (humidity - 50) / 10 * 1.0
+
+    # 바람 보정: 1m/s당 -0.5bpm (냉각 효과)
+    wind_correction = wind_speed * (-0.5)
+
+    # 총 보정값
+    total_correction = temp_correction + humidity_correction + wind_correction
+
+    # 보정 설명 텍스트
+    if total_correction > 5:
+        comment = f"고온다습으로 심박 약 {round(total_correction)}bpm 높게 측정됐어요"
+    elif total_correction > 2:
+        comment = f"날씨 영향으로 심박 약 {round(total_correction)}bpm 높게 측정됐어요"
+    elif total_correction < -2:
+        comment = f"서늘한 날씨로 심박 약 {abs(round(total_correction))}bpm 낮게 측정됐어요"
+    else:
+        comment = "날씨 영향 거의 없음"
+
+    return {
+        "correction": round(total_correction, 1),
+        "comment": comment,
+        "adjusted_heartrate": None,  # main에서 실제 심박수 받아서 계산
+    }
