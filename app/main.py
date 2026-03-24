@@ -4,11 +4,13 @@ from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import RedirectResponse
 
 import app.config as config
-from app.ai.claude import analyze_activity
+from app.ai.claude import analyze_activity, generate_weekly_schedule
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_user
 from app.services.telegram import send_message, format_activity_message
+from app.services.notion import create_weekly_report, generate_weekly_analysis
+from app.services.strava import get_weekly_activities
 
 app = FastAPI(title="Running Coach AI")
 
@@ -125,11 +127,14 @@ async def receive_strava_event(request: Request):
 
         # 4. Claude 분석
         analysis = await analyze_activity(activity, weekly, weather, hr_correction)
-        print(f"Claude 분석:\n{analysis}")
+
+        # 차주 훈련 스케줄 생성
+        schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
 
         # 5. Telegram 메시지로 전송 (기존 요약 + Claude 분석 합쳐서)
         message = format_activity_message(activity, weather)
         message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
+        message += f"\n\n📅 <b>다음 주 훈련 스케줄</b>\n{schedule}"
         await send_message(message)
 
         print(f"=== 운동 분석 결과 ===")
@@ -161,3 +166,30 @@ async def test_weather():
     from app.services.weather import get_weather
     weather = await get_weather()
     return weather
+
+
+@app.get("/test/notion")
+async def test_notion():
+    weekly = await get_weekly_activities(196195036)
+    analysis = await generate_weekly_analysis(weekly)
+
+    from app.ai.claude import generate_weekly_schedule
+    # 빈 activity 대신 기본값 딕셔너리 전달
+    empty_activity = {
+        "distance_km": 0,
+        "pace": "N/A",
+        "avg_heartrate": 0,
+        "splits": [],
+        "moving_time": "0:00",
+        "max_pace": "N/A",
+        "max_heartrate": 0,
+        "avg_cadence": 0,
+        "calories": 0,
+        "elevation_gain": 0,
+        "pr_rank": None,
+        "name": "주간 스케줄 생성",
+        "date": "",
+    }
+    schedule = await generate_weekly_schedule(empty_activity, weekly)
+    result = await create_weekly_report(weekly, analysis, schedule)
+    return {"success": result, "analysis": analysis}

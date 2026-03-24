@@ -1,6 +1,6 @@
 import httpx
 import app.config as config
-
+from datetime import datetime
 
 async def analyze_activity(activity: dict, weekly_activities: list, weather: dict = None, hr_correction: dict = None) -> str:
     """
@@ -8,6 +8,7 @@ async def analyze_activity(activity: dict, weekly_activities: list, weather: dic
     
     activity: parse_activity()로 파싱된 오늘 운동 데이터
     weekly_activities: 이번 주 활동 목록 (누적 현황용)
+    hr_correction: 날씨 기반 심박수 보정 정보
     """
 
     # 이번 주 누적 데이터 계산
@@ -102,6 +103,100 @@ async def analyze_activity(activity: dict, weekly_activities: list, weather: dic
     if response.status_code != 200:
         print(f"Claude API 에러: {response.status_code} {response.text}")
         return "분석을 불러오지 못했어요."
+
+    result = response.json()
+    return result["content"][0]["text"]
+
+
+async def generate_weekly_schedule(
+    activity: dict,
+    weekly_activities: list,
+    weather: dict = None,
+    hr_correction: dict = None,
+) -> str:
+    """
+    차주 훈련 스케줄 생성
+    오늘 운동 + 이번 주 누적 데이터 기반
+    """
+    from datetime import datetime, timedelta
+
+    # 하프마라톤까지 남은 날짜
+    goal_date = datetime(2026, 4, 26)
+    today = datetime.now()
+    days_left = (goal_date - today).days
+
+    # 이번 주 누적
+    weekly_distance = sum(a.get("distance", 0) / 1000 for a in weekly_activities)
+    weekly_count = len(weekly_activities)
+
+    # 다음 주 날짜 계산
+    next_monday = today + timedelta(days=(7 - today.weekday()))
+    dates = [(next_monday + timedelta(days=i)).strftime("%m/%d (%a)") for i in range(7)]
+    days_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    schedule_dates = [f"{dates[i]} ({days_kr[i]})" for i in range(7)]
+
+    prompt = f"""당신은 전문 러닝 코치입니다. 다음 데이터를 기반으로 다음 주 훈련 스케줄을 한국어로 작성해주세요.
+
+## 오늘 운동
+- 거리: {activity['distance_km']}km
+- 페이스: {activity['pace']}
+- 평균 심박: {activity['avg_heartrate']}bpm
+- 보정 심박: {hr_correction['adjusted_heartrate'] if hr_correction else 'N/A'}bpm
+
+## 이번 주 누적
+- 총 횟수: {weekly_count}회
+- 총 거리: {round(weekly_distance, 2)}km
+
+## 목표
+- 하프마라톤 완주: 4월 26일 (D-{days_left})
+- 심박수 안정화 (존2 훈련 비율 높이기)
+
+## 다음 주 날짜
+{schedule_dates[0]}
+{schedule_dates[1]}
+{schedule_dates[2]}
+{schedule_dates[3]}
+{schedule_dates[4]}
+{schedule_dates[5]}
+{schedule_dates[6]}
+
+## 요청
+위 날짜에 맞게 다음 주 7일 훈련 스케줄을 작성해주세요.
+각 날짜별로:
+- 훈련 종류 (휴식/존2조깅/템포런/인터벌/LSD)
+- 거리
+- 목표 페이스
+- 목표 심박수
+
+규칙:
+- 하프마라톤 D-{days_left}일 기준 적절한 훈련량
+- 주당 1-2회 휴식일 포함
+- 주말에 LSD (Long Slow Distance) 배치
+- 존2 훈련 비율 60% 이상
+- 총 주간 거리는 이번 주 대비 10% 이내 증가
+
+답변은 날짜별로 간결하게 작성해주세요."""
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": config.CLAUDE_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+            }
+        )
+
+    if response.status_code != 200:
+        print(f"Claude API 에러: {response.status_code} {response.text}")
+        return "스케줄 생성에 실패했어요."
 
     result = response.json()
     return result["content"][0]["text"]

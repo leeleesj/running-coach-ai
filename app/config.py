@@ -23,6 +23,9 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 WEATHER_NX = os.getenv("WEATHER_NX", "59")
 WEATHER_NY = os.getenv("WEATHER_NY", "124")
 
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+
 # 필수 값 없으면 서버 시작 시 바로 에러
 required = {
     "STRAVA_CLIENT_ID": STRAVA_CLIENT_ID,
@@ -35,6 +38,8 @@ required = {
     "STRAVA_REFRESH_TOKEN": STRAVA_REFRESH_TOKEN,
     "STRAVA_ATHLETE_ID": STRAVA_ATHLETE_ID,
     "WEATHER_API_KEY": WEATHER_API_KEY,
+    "NOTION_API_KEY": NOTION_API_KEY,
+    "NOTION_DATABASE_ID": NOTION_DATABASE_ID,
 }
 
 for key, value in required.items():
