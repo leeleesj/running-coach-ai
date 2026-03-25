@@ -2,6 +2,7 @@ import httpx
 import time
 from datetime import datetime, timedelta
 
+from app.models.activity import ActivityData, SplitData
 from app.models.database import get_user, update_tokens
 import app.config as config
 
@@ -222,53 +223,34 @@ def parse_activity(raw: dict) -> dict:
             "pace_zone": s.get("pace_zone"),
         })
 
-    return {
-        # 기본 정보
-        "id": raw.get("id"),
-        "name": raw.get("name"),
-        "type": raw.get("sport_type", "Run"),
-        "workout_type": raw.get("workout_type"),
-        "device_name": raw.get("device_name"),
-        "date": start_date_formatted,
-
-        # 거리/시간
-        "distance_km": distance_km,
-        "moving_time": seconds_to_time(moving_time_sec),
-        "moving_time_sec": moving_time_sec,
-        "elapsed_time_sec": elapsed_time_sec,
-
-        # 페이스
-        "pace": seconds_to_pace(average_speed),
-        "max_pace": seconds_to_pace(max_speed),
-        "avg_pace_sec": speed_to_pace_sec(average_speed),
-        "max_pace_sec": speed_to_pace_sec(max_speed),
-
-        # 심박수 (원본만, 보정값은 main.py에서 추가)
-        "avg_heartrate": avg_heartrate,
-        "max_heartrate": max_heartrate,
-
-        # 케이던스
-        "avg_cadence": avg_cadence,
-
-        # 고도
-        "elevation_gain": raw.get("total_elevation_gain", 0),
-        "elev_high": raw.get("elev_high"),
-        "elev_low": raw.get("elev_low"),
-
-        # 칼로리/피로
-        "calories": raw.get("calories", 0),
-        "suffer_score": raw.get("suffer_score"),
-        "perceived_exertion": raw.get("perceived_exertion"),
-
-        # 성과
-        "pr_count": raw.get("pr_count", 0),
-        "achievement_count": raw.get("achievement_count", 0),
-        "pr_rank": pr_rank,
-        "trend_direction": trend_direction,
-
-        # 구간
-        "splits": splits,
-
-        # 기타
-        "manual": raw.get("manual", False),
-    }
+    return ActivityData(
+        id=raw.get("id"),
+        name=raw.get("name"),
+        type=raw.get("sport_type", "Run"),
+        workout_type=raw.get("workout_type"),
+        device_name=raw.get("device_name"),
+        date=start_date_formatted,
+        distance_km=distance_km,
+        moving_time=seconds_to_time(moving_time_sec),
+        moving_time_sec=moving_time_sec,
+        elapsed_time_sec=elapsed_time_sec,
+        pace=seconds_to_pace(average_speed),
+        max_pace=seconds_to_pace(max_speed),
+        avg_pace_sec=speed_to_pace_sec(average_speed),
+        max_pace_sec=speed_to_pace_sec(max_speed),
+        avg_heartrate=avg_heartrate,
+        max_heartrate=max_heartrate,
+        avg_cadence=avg_cadence,
+        elevation_gain=raw.get("total_elevation_gain", 0),
+        elev_high=raw.get("elev_high"),
+        elev_low=raw.get("elev_low"),
+        calories=raw.get("calories", 0),
+        suffer_score=raw.get("suffer_score"),
+        perceived_exertion=raw.get("perceived_exertion"),
+        pr_count=raw.get("pr_count", 0),
+        achievement_count=raw.get("achievement_count", 0),
+        pr_rank=pr_rank,
+        trend_direction=trend_direction,
+        splits=[SplitData(**s) for s in splits],
+        manual=raw.get("manual", False),
+    )

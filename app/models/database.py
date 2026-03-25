@@ -1,6 +1,10 @@
 import sqlite3
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.activity import ActivityData, SplitData
 
 # DB 파일 경로
 DB_PATH = Path("data/running_coach.db")
@@ -9,7 +13,7 @@ DB_PATH = Path("data/running_coach.db")
 def get_connection():
     """DB 연결 반환. Row를 딕셔너리로 접근 가능하게 설정"""
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # result["column_name"] 으로 접근 가능
+    conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -144,7 +148,6 @@ def init_db():
     """)
 
     # 기존 테이블에 새 컬럼 추가 (마이그레이션)
-    # 이미 있는 컬럼이면 에러 무시
     migrations = [
         "ALTER TABLE activities ADD COLUMN training_type TEXT",
         "ALTER TABLE activities ADD COLUMN fatigue_score INTEGER",
@@ -172,20 +175,19 @@ def init_db():
         try:
             cursor.execute(migration)
         except Exception:
-            pass  # 이미 존재하는 컬럼이면 무시
+            pass
 
     conn.commit()
     conn.close()
     print("DB 초기화 완료!")
 
 
-def save_activity(parsed: dict, user_id: int = 1) -> int:
+def save_activity(parsed: "ActivityData", user_id: int = 1) -> int:
     """
-    파싱된 운동 데이터를 DB에 저장
+    ActivityData Pydantic 모델을 DB에 저장
     이미 저장된 strava_id면 업데이트, 없으면 새로 삽입 (upsert)
-    보정된 심박수는 main.py에서 parsed에 추가 후 넘겨줌
     """
-    print(f"저장할 데이터: id={parsed.get('id')}, name={parsed.get('name')}")
+    print(f"저장할 데이터: id={parsed.id}, name={parsed.name}")
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -227,35 +229,35 @@ def save_activity(parsed: dict, user_id: int = 1) -> int:
             raw_json=excluded.raw_json
     """, (
         user_id,
-        parsed["id"],
-        parsed["name"],
-        parsed["type"],
-        parsed.get("workout_type"),
-        parsed.get("device_name"),
-        parsed["date"],
-        parsed["distance_km"],
-        parsed.get("moving_time_sec"),
-        parsed.get("elapsed_time_sec"),
-        parsed.get("avg_pace_sec"),
-        parsed.get("max_pace_sec"),
-        parsed.get("avg_heartrate"),
-        parsed.get("max_heartrate"),
-        parsed.get("avg_heartrate_adjusted"),
-        parsed.get("hr_correction"),
-        parsed.get("hr_correction_comment"),
-        parsed.get("avg_cadence"),
-        parsed.get("elevation_gain"),
-        parsed.get("elev_high"),
-        parsed.get("elev_low"),
-        parsed.get("calories"),
-        parsed.get("suffer_score"),
-        parsed.get("perceived_exertion"),
-        parsed.get("pr_count"),
-        parsed.get("achievement_count"),
-        parsed.get("pr_rank"),
-        parsed.get("trend_direction"),
-        json.dumps(parsed.get("splits", []), ensure_ascii=False),
-        json.dumps(parsed.get("raw", {}), ensure_ascii=False),
+        parsed.id,
+        parsed.name,
+        parsed.type,
+        parsed.workout_type,
+        parsed.device_name,
+        parsed.date,
+        parsed.distance_km,
+        parsed.moving_time_sec,
+        parsed.elapsed_time_sec,
+        parsed.avg_pace_sec,
+        parsed.max_pace_sec,
+        parsed.avg_heartrate,
+        parsed.max_heartrate,
+        parsed.avg_heartrate_adjusted,
+        parsed.hr_correction,
+        parsed.hr_correction_comment,
+        parsed.avg_cadence,
+        parsed.elevation_gain,
+        parsed.elev_high,
+        parsed.elev_low,
+        parsed.calories,
+        parsed.suffer_score,
+        parsed.perceived_exertion,
+        parsed.pr_count,
+        parsed.achievement_count,
+        parsed.pr_rank,
+        parsed.trend_direction,
+        json.dumps([s.model_dump() for s in parsed.splits], ensure_ascii=False),
+        "{}",
     ))
 
     conn.commit()
@@ -263,7 +265,7 @@ def save_activity(parsed: dict, user_id: int = 1) -> int:
     # 저장된 activity의 db_id 가져오기
     cursor.execute(
         "SELECT id FROM activities WHERE strava_id = ?",
-        (parsed["id"],)
+        (parsed.id,)
     )
     row = cursor.fetchone()
     activity_db_id = row["id"] if row else 0
@@ -275,7 +277,7 @@ def save_activity(parsed: dict, user_id: int = 1) -> int:
 
 def save_splits(activity_db_id: int, splits: list) -> None:
     """
-    km별 구간 데이터를 splits 테이블에 저장
+    SplitData Pydantic 모델 리스트를 splits 테이블에 저장
     activity_db_id: activities 테이블의 id (strava_id 아님)
     """
     if not splits:
@@ -288,21 +290,39 @@ def save_splits(activity_db_id: int, splits: list) -> None:
     cursor.execute("DELETE FROM splits WHERE activity_id = ?", (activity_db_id,))
 
     for split in splits:
-        cursor.execute("""
-            INSERT INTO splits (
-                activity_id, km, pace_sec, avg_grade_adjusted_pace_sec,
-                heartrate, distance_m, elevation_diff, pace_zone
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            activity_db_id,
-            split.get("km"),
-            split.get("pace_sec"),
-            split.get("avg_grade_adjusted_pace_sec"),
-            split.get("avg_heartrate"),
-            split.get("distance_m"),
-            split.get("elevation_diff"),
-            split.get("pace_zone"),
-        ))
+        # Pydantic 모델이면 속성으로, 딕셔너리면 get으로 접근
+        if hasattr(split, "km"):
+            cursor.execute("""
+                INSERT INTO splits (
+                    activity_id, km, pace_sec, avg_grade_adjusted_pace_sec,
+                    heartrate, distance_m, elevation_diff, pace_zone
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                activity_db_id,
+                split.km,
+                split.pace_sec,
+                split.avg_grade_adjusted_pace_sec,
+                split.avg_heartrate,
+                split.distance_m,
+                split.elevation_diff,
+                split.pace_zone,
+            ))
+        else:
+            cursor.execute("""
+                INSERT INTO splits (
+                    activity_id, km, pace_sec, avg_grade_adjusted_pace_sec,
+                    heartrate, distance_m, elevation_diff, pace_zone
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                activity_db_id,
+                split.get("km"),
+                split.get("pace_sec"),
+                split.get("avg_grade_adjusted_pace_sec"),
+                split.get("avg_heartrate"),
+                split.get("distance_m"),
+                split.get("elevation_diff"),
+                split.get("pace_zone"),
+            ))
 
     conn.commit()
     conn.close()
@@ -311,10 +331,7 @@ def save_splits(activity_db_id: int, splits: list) -> None:
 
 def save_user(athlete_id: int, name: str, access_token: str,
               refresh_token: str, expires_at: int) -> int:
-    """
-    유저 저장 또는 업데이트 (upsert)
-    OAuth 완료할 때마다 호출
-    """
+    """유저 저장 또는 업데이트 (upsert)"""
     conn = get_connection()
     cursor = conn.cursor()
 

@@ -1,13 +1,24 @@
 import httpx
 import app.config as config
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
-async def analyze_activity(activity: dict, weekly_activities: list, weather: dict = None, hr_correction: dict = None) -> str:
+if TYPE_CHECKING:
+    from app.models.activity import ActivityData
+
+
+async def analyze_activity(
+    activity: "ActivityData",
+    weekly_activities: list,
+    weather: dict = None,
+    hr_correction: dict = None,
+) -> str:
     """
     운동 데이터를 Claude API로 분석
-    
-    activity: parse_activity()로 파싱된 오늘 운동 데이터
+
+    activity: ActivityData Pydantic 모델
     weekly_activities: 이번 주 활동 목록 (누적 현황용)
+    weather: 날씨 데이터
     hr_correction: 날씨 기반 심박수 보정 정보
     """
 
@@ -17,9 +28,9 @@ async def analyze_activity(activity: dict, weekly_activities: list, weather: dic
 
     # km별 구간 데이터 텍스트로 변환
     splits_text = ""
-    for s in activity.get("splits", []):
-        splits_text += f"  {s['km']}km: 페이스 {s['pace']}, 심박 {s['avg_heartrate']}bpm\n"
-    
+    for s in activity.splits:
+        splits_text += f"  {s.km}km: 페이스 {s.pace}, 심박 {s.avg_heartrate}bpm\n"
+
     # 날씨 정보 텍스트 변환
     weather_text = ""
     if weather:
@@ -32,14 +43,14 @@ async def analyze_activity(activity: dict, weekly_activities: list, weather: dic
 - 강수확률: {weather['rain_probability']}%
 - 러닝 조건: {weather['running_condition']}
 """
-        
+
     # 심박 보정 텍스트
     hr_correction_text = ""
-    if hr_correction and hr_correction["correction"] != 0:
+    if hr_correction and hr_correction.get("correction"):
         hr_correction_text = f"""
 ## 날씨 기반 심박수 보정
 - 보정값: {hr_correction['correction']:+.1f}bpm
-- 보정 후 평균 심박: {hr_correction['adjusted_heartrate']}bpm
+- 보정 후 평균 심박: {hr_correction.get('adjusted_heartrate', 'N/A')}bpm
 - 설명: {hr_correction['comment']}
 """
 
@@ -47,17 +58,17 @@ async def analyze_activity(activity: dict, weekly_activities: list, weather: dic
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석하고 피드백을 한국어로 제공해주세요.
 
 ## 오늘 운동 데이터
-- 날짜: {activity['date']}
-- 운동명: {activity['name']}
-- 거리: {activity['distance_km']}km
-- 시간: {activity['moving_time']}
-- 평균 페이스: {activity['pace']}
-- 최고 페이스: {activity['max_pace']}
-- 평균 심박수: {activity['avg_heartrate']}bpm
-- 최고 심박수: {activity['max_heartrate']}bpm
-- 케이던스: {activity['avg_cadence']}spm
-- 칼로리: {activity['calories']}kcal
-- 고도 상승: {activity['elevation_gain']}m
+- 날짜: {activity.date}
+- 운동명: {activity.name}
+- 거리: {activity.distance_km}km
+- 시간: {activity.moving_time}
+- 평균 페이스: {activity.pace}
+- 최고 페이스: {activity.max_pace}
+- 평균 심박수: {activity.avg_heartrate}bpm
+- 최고 심박수: {activity.max_heartrate}bpm
+- 케이던스: {activity.avg_cadence}spm
+- 칼로리: {activity.calories}kcal
+- 고도 상승: {activity.elevation_gain}m
 
 ## km별 구간 데이터
 {splits_text}
@@ -109,7 +120,7 @@ async def analyze_activity(activity: dict, weekly_activities: list, weather: dic
 
 
 async def generate_weekly_schedule(
-    activity: dict,
+    activity: "ActivityData",
     weekly_activities: list,
     weather: dict = None,
     hr_correction: dict = None,
@@ -118,7 +129,6 @@ async def generate_weekly_schedule(
     차주 훈련 스케줄 생성
     오늘 운동 + 이번 주 누적 데이터 기반
     """
-    from datetime import datetime, timedelta
 
     # 하프마라톤까지 남은 날짜
     goal_date = datetime(2026, 4, 26)
@@ -135,13 +145,25 @@ async def generate_weekly_schedule(
     days_kr = ["월", "화", "수", "목", "금", "토", "일"]
     schedule_dates = [f"{dates[i]} ({days_kr[i]})" for i in range(7)]
 
+    # activity가 Pydantic 모델인지 딕셔너리인지 확인
+    if hasattr(activity, "distance_km"):
+        distance_km = activity.distance_km
+        pace = activity.pace
+        avg_heartrate = activity.avg_heartrate
+    else:
+        distance_km = activity.get("distance_km", 0)
+        pace = activity.get("pace", "N/A")
+        avg_heartrate = activity.get("avg_heartrate", 0)
+
+    adjusted_heartrate = hr_correction.get("adjusted_heartrate", "N/A") if hr_correction else "N/A"
+
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 데이터를 기반으로 다음 주 훈련 스케줄을 한국어로 작성해주세요.
 
 ## 오늘 운동
-- 거리: {activity['distance_km']}km
-- 페이스: {activity['pace']}
-- 평균 심박: {activity['avg_heartrate']}bpm
-- 보정 심박: {hr_correction['adjusted_heartrate'] if hr_correction else 'N/A'}bpm
+- 거리: {distance_km}km
+- 페이스: {pace}
+- 평균 심박: {avg_heartrate}bpm
+- 보정 심박: {adjusted_heartrate}bpm
 
 ## 이번 주 누적
 - 총 횟수: {weekly_count}회
