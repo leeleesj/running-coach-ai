@@ -1,6 +1,7 @@
 import hmac
 import httpx
-from fastapi import FastAPI, Request, Query, HTTPException
+import asyncio
+from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 
 import app.config as config
@@ -13,6 +14,9 @@ from app.services.notion import create_weekly_report, generate_weekly_analysis
 
 app = FastAPI(title="Running Coach AI")
 
+# 처리 중인 activity_id 추적 (중복 방지)
+processing_ids: set = set()
+
 
 @app.on_event("startup")
 async def startup():
@@ -21,13 +25,11 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    # 서버가 살아있는지 확인하는 엔드포인트
     return {"status": "ok", "service": "running-coach-ai"}
 
 
 @app.get("/strava/login")
 async def strava_login():
-    # Strava 로그인 페이지로 리다이렉트
     auth_url = (
         f"https://www.strava.com/oauth/authorize"
         f"?client_id={config.STRAVA_CLIENT_ID}"
@@ -51,7 +53,6 @@ async def strava_callback(code: str):
             }
         )
     token_data = response.json()
-
     save_user(
         athlete_id=token_data["athlete"]["id"],
         name=token_data["athlete"]["firstname"],
@@ -59,7 +60,6 @@ async def strava_callback(code: str):
         refresh_token=token_data["refresh_token"],
         expires_at=token_data["expires_at"],
     )
-
     return {"message": "인증 완료!", "athlete": token_data["athlete"]["firstname"]}
 
 
@@ -69,18 +69,16 @@ async def verify_strava_webhook(
     hub_challenge: str = Query(alias="hub.challenge"),
     hub_verify_token: str = Query(alias="hub.verify_token"),
 ):
-    # Strava가 Webhook 등록할 때 검증 요청 보냄
     if not hmac.compare_digest(
         hub_verify_token,
         config.STRAVA_WEBHOOK_VERIFY_TOKEN,
     ):
         raise HTTPException(status_code=403, detail="Invalid verify token")
-
     return {"hub.challenge": hub_challenge}
 
 
 @app.post("/webhook/strava")
-async def receive_strava_event(request: Request):
+async def receive_strava_event(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
 
     object_type = data.get("object_type")
@@ -91,27 +89,52 @@ async def receive_strava_event(request: Request):
     print(f"Webhook 수신: {object_type} {aspect_type} id={activity_id}")
 
     if object_type == "activity" and aspect_type in ("create", "update"):
-        print(f"새 운동 감지! ID: {activity_id}")
 
-        # 1. Strava API로 운동 상세 데이터 가져오기
+        # 현재 처리 중인 activity면 스킵
+        if activity_id in processing_ids:
+            print(f"이미 처리 중, 스킵: {activity_id}")
+            return {"status": "EVENT_RECEIVED"}
+
+        # 백그라운드로 처리 등록
+        background_tasks.add_task(
+            process_activity,
+            activity_id,
+            athlete_id,
+            aspect_type,
+        )
+
+    # Strava에 즉시 200 반환!
+    return {"status": "EVENT_RECEIVED"}
+
+
+async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
+    """백그라운드에서 운동 데이터 처리"""
+
+    processing_ids.add(activity_id)
+
+    try:
+        # create 이벤트 중복 방지
+        if aspect_type == "create" and is_already_processed(activity_id):
+            print(f"이미 처리된 활동, 스킵: {activity_id}")
+            return
+
+        print(f"새 운동 처리 시작! ID: {activity_id}")
+
         raw = await get_activity(activity_id, athlete_id)
         if not raw:
             print(f"운동 데이터 가져오기 실패: {activity_id}")
-            return {"status": "EVENT_RECEIVED"}
+            return
 
         activity = parse_activity(raw)
 
-        # 2. 운동 시작 위치로 날씨 가져오기
         start_latlng = raw.get("start_latlng", [])
         if start_latlng:
             weather = await get_weather(lat=start_latlng[0], lon=start_latlng[1])
         else:
             weather = await get_weather()
 
-        # 3. 날씨 기반 심박수 보정 계산
         hr_correction = calculate_heartrate_correction(weather)
 
-        # 보정값을 activity Pydantic 모델에 추가
         if activity.avg_heartrate and hr_correction["correction"]:
             adjusted_hr = round(activity.avg_heartrate - hr_correction["correction"], 1)
             hr_correction["adjusted_heartrate"] = adjusted_hr
@@ -120,73 +143,56 @@ async def receive_strava_event(request: Request):
             activity.hr_correction_comment = hr_correction["comment"]
             print(f"심박 보정: {activity.avg_heartrate}bpm → {adjusted_hr}bpm ({hr_correction['comment']})")
 
-        # 4. 이번 주 활동 가져오기
         weekly = await get_weekly_activities(athlete_id)
 
-        # 5. DB 저장
         activity_db_id = save_activity(activity)
         save_splits(activity_db_id, activity.splits)
 
-        # 6. Claude 운동 분석
         analysis = await analyze_activity(activity, weekly, weather, hr_correction)
-
-        # 7. 차주 훈련 스케줄 생성
         schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
 
-        # 8. 텔레그램 메시지 전송
         message = format_activity_message(activity, weather)
         message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
         message += f"\n\n📅 <b>다음 주 훈련 스케줄</b>\n{schedule}"
         await send_message(message)
 
-        # 터미널 출력 (디버깅용)
-        print(f"=== 운동 분석 결과 ===")
+        print(f"=== 운동 분석 완료 ===")
         print(f"날짜: {activity.date}")
         print(f"거리: {activity.distance_km} km")
         print(f"시간: {activity.moving_time}")
         print(f"평균 페이스: {activity.pace}")
-        print(f"최고 페이스: {activity.max_pace}")
         print(f"평균 심박: {activity.avg_heartrate} bpm")
-        print(f"최고 심박: {activity.max_heartrate} bpm")
-        print(f"케이던스: {activity.avg_cadence} spm")
-        print(f"칼로리: {activity.calories} kcal")
-        print(f"고도 상승: {activity.elevation_gain} m")
-        if activity.suffer_score:
-            print(f"고통 점수: {activity.suffer_score}")
-        if activity.workout_type:
-            print(f"훈련 유형: {activity.workout_type}")
         if activity.pr_rank == 1:
             print(f"🏆 역대 최고 페이스!")
         elif activity.pr_rank:
             print(f"기록 순위: {activity.pr_rank}위")
-        if activity.trend_direction == 1:
-            print(f"📈 최근 속도 트렌드: 향상 중!")
-        elif activity.trend_direction == -1:
-            print(f"📉 최근 속도 트렌드: 저하 중")
-
         print(f"\n--- km별 구간 분석 ---")
         for s in activity.splits:
             print(f"{s.km}km: 페이스 {s.pace} | 심박 {s.avg_heartrate} bpm")
         print(f"====================")
 
-    return {"status": "EVENT_RECEIVED"}
+    except Exception as e:
+        print(f"처리 실패: {activity_id}, 에러: {e}")
+        await send_message(f"⚠️ 운동 분석 중 오류가 발생했어요.\n{str(e)}")
+
+    finally:
+        # 5분 후 처리 완료 표시 제거
+        await asyncio.sleep(300)
+        processing_ids.discard(activity_id)
 
 
-# ── 테스트 엔드포인트 (개발 중에만 사용) ──────────────────────────
+# ── 테스트 엔드포인트 ──────────────────────────
 
 @app.get("/test/weather")
 async def test_weather():
-    """날씨 API 테스트"""
     weather = await get_weather()
     return weather
 
 
 @app.get("/test/notion")
 async def test_notion():
-    """Notion 주간 리포트 테스트"""
     weekly = await get_weekly_activities(196195036)
     analysis = await generate_weekly_analysis(weekly)
-
     empty_activity = {
         "distance_km": 0,
         "pace": "N/A",
