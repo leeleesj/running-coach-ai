@@ -120,42 +120,79 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
 
         print(f"새 운동 처리 시작! ID: {activity_id}")
 
+        # 1. Strava 데이터 가져오기 (실패하면 중단)
         raw = await get_activity(activity_id, athlete_id)
         if not raw:
             print(f"운동 데이터 가져오기 실패: {activity_id}")
+            await send_message(f"⚠️ 운동 데이터를 가져오지 못했어요. (ID: {activity_id})")
             return
 
         activity = parse_activity(raw)
 
-        start_latlng = raw.get("start_latlng", [])
-        if start_latlng:
-            weather = await get_weather(lat=start_latlng[0], lon=start_latlng[1])
-        else:
-            weather = await get_weather()
+        # 2. 날씨 가져오기 (실패해도 계속)
+        weather = {}
+        try:
+            start_latlng = raw.get("start_latlng", [])
+            if start_latlng:
+                weather = await get_weather(lat=start_latlng[0], lon=start_latlng[1])
+            else:
+                weather = await get_weather()
+        except Exception as e:
+            print(f"날씨 API 실패 (계속 진행): {e}")
 
-        hr_correction = calculate_heartrate_correction(weather)
+        # 3. 심박 보정 (날씨 없으면 스킵)
+        hr_correction = {}
+        try:
+            if weather:
+                hr_correction = calculate_heartrate_correction(weather)
+                if activity.avg_heartrate and hr_correction.get("correction"):
+                    adjusted_hr = round(activity.avg_heartrate - hr_correction["correction"], 1)
+                    hr_correction["adjusted_heartrate"] = adjusted_hr
+                    activity.avg_heartrate_adjusted = adjusted_hr
+                    activity.hr_correction = hr_correction["correction"]
+                    activity.hr_correction_comment = hr_correction["comment"]
+                    print(f"심박 보정: {activity.avg_heartrate}bpm → {adjusted_hr}bpm ({hr_correction['comment']})")
+        except Exception as e:
+            print(f"심박 보정 실패 (계속 진행): {e}")
 
-        if activity.avg_heartrate and hr_correction["correction"]:
-            adjusted_hr = round(activity.avg_heartrate - hr_correction["correction"], 1)
-            hr_correction["adjusted_heartrate"] = adjusted_hr
-            activity.avg_heartrate_adjusted = adjusted_hr
-            activity.hr_correction = hr_correction["correction"]
-            activity.hr_correction_comment = hr_correction["comment"]
-            print(f"심박 보정: {activity.avg_heartrate}bpm → {adjusted_hr}bpm ({hr_correction['comment']})")
+        # 4. 이번 주 활동 가져오기 (실패하면 빈 리스트)
+        weekly = []
+        try:
+            weekly = await get_weekly_activities(athlete_id)
+        except Exception as e:
+            print(f"주간 활동 가져오기 실패 (계속 진행): {e}")
 
-        weekly = await get_weekly_activities(athlete_id)
+        # 5. DB 저장 (실패해도 계속)
+        activity_db_id = 0
+        try:
+            activity_db_id = save_activity(activity)
+            save_splits(activity_db_id, activity.splits)
+        except Exception as e:
+            print(f"DB 저장 실패 (계속 진행): {e}")
+            await send_message(f"⚠️ DB 저장 실패: {str(e)}")
 
-        activity_db_id = save_activity(activity)
-        save_splits(activity_db_id, activity.splits)
+        # 6. Claude 분석 (실패하면 기본 메시지만)
+        analysis = ""
+        schedule = ""
+        try:
+            analysis = await analyze_activity(activity, weekly, weather, hr_correction)
+            schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
+        except Exception as e:
+            print(f"Claude 분석 실패 (기본 메시지만 전송): {e}")
+            await send_message(f"⚠️ AI 분석 실패, 운동 요약만 전송해요.")
 
-        analysis = await analyze_activity(activity, weekly, weather, hr_correction)
-        schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
+        # 7. 텔레그램 전송 (실패하면 로그만)
+        try:
+            message = format_activity_message(activity, weather)
+            if analysis:
+                message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
+            if schedule:
+                message += f"\n\n📅 <b>다음 주 훈련 스케줄</b>\n{schedule}"
+            await send_message(message)
+        except Exception as e:
+            print(f"텔레그램 전송 실패: {e}")
 
-        message = format_activity_message(activity, weather)
-        message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
-        message += f"\n\n📅 <b>다음 주 훈련 스케줄</b>\n{schedule}"
-        await send_message(message)
-
+        # 터미널 출력
         print(f"=== 운동 분석 완료 ===")
         print(f"날짜: {activity.date}")
         print(f"거리: {activity.distance_km} km")
@@ -172,11 +209,14 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         print(f"====================")
 
     except Exception as e:
-        print(f"처리 실패: {activity_id}, 에러: {e}")
-        await send_message(f"⚠️ 운동 분석 중 오류가 발생했어요.\n{str(e)}")
+        # 예상치 못한 전체 에러
+        print(f"예상치 못한 에러: {activity_id}, {e}")
+        try:
+            await send_message(f"⚠️ 예상치 못한 오류가 발생했어요.\n{str(e)}")
+        except:
+            pass
 
     finally:
-        # 5분 후 처리 완료 표시 제거
         await asyncio.sleep(300)
         processing_ids.discard(activity_id)
 
