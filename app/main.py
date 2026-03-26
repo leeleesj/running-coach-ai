@@ -5,11 +5,11 @@ from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 
 import app.config as config
-from app.ai.claude import analyze_activity, generate_weekly_schedule
+from app.ai.claude import analyze_activity, generate_weekly_schedule, parse_claude_response
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed
-from app.services.telegram import send_message, format_activity_message
+from app.services.telegram import send_message, format_activity_message, format_analysis_message
 from app.services.notion import create_weekly_report, generate_weekly_analysis
 
 app = FastAPI(title="Running Coach AI")
@@ -33,7 +33,7 @@ async def strava_login():
     auth_url = (
         f"https://www.strava.com/oauth/authorize"
         f"?client_id={config.STRAVA_CLIENT_ID}"
-        f"&redirect_uri=https://trivia-physically-bracelet-johnston.trycloudflare.com/strava/callback"
+        f"&redirect_uri=https://newport-technology-appreciation-karl.trycloudflare.com/strava/callback"
         f"&response_type=code"
         f"&scope=activity:read_all"
     )
@@ -53,6 +53,7 @@ async def strava_callback(code: str):
             }
         )
     token_data = response.json()
+
     save_user(
         athlete_id=token_data["athlete"]["id"],
         name=token_data["athlete"]["firstname"],
@@ -60,6 +61,7 @@ async def strava_callback(code: str):
         refresh_token=token_data["refresh_token"],
         expires_at=token_data["expires_at"],
     )
+
     return {"message": "인증 완료!", "athlete": token_data["athlete"]["firstname"]}
 
 
@@ -74,6 +76,7 @@ async def verify_strava_webhook(
         config.STRAVA_WEBHOOK_VERIFY_TOKEN,
     ):
         raise HTTPException(status_code=403, detail="Invalid verify token")
+
     return {"hub.challenge": hub_challenge}
 
 
@@ -89,13 +92,12 @@ async def receive_strava_event(request: Request, background_tasks: BackgroundTas
     print(f"Webhook 수신: {object_type} {aspect_type} id={activity_id}")
 
     if object_type == "activity" and aspect_type in ("create", "update"):
-
         # 현재 처리 중인 activity면 스킵
         if activity_id in processing_ids:
             print(f"이미 처리 중, 스킵: {activity_id}")
             return {"status": "EVENT_RECEIVED"}
 
-        # 백그라운드로 처리 등록
+        # 백그라운드로 처리 (즉시 200 반환)
         background_tasks.add_task(
             process_activity,
             activity_id,
@@ -103,7 +105,6 @@ async def receive_strava_event(request: Request, background_tasks: BackgroundTas
             aspect_type,
         )
 
-    # Strava에 즉시 200 반환!
     return {"status": "EVENT_RECEIVED"}
 
 
@@ -120,7 +121,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
 
         print(f"새 운동 처리 시작! ID: {activity_id}")
 
-        # 1. Strava 데이터 가져오기 (실패하면 중단)
+        # 1. Strava 데이터 가져오기
         raw = await get_activity(activity_id, athlete_id)
         if not raw:
             print(f"운동 데이터 가져오기 실패: {activity_id}")
@@ -155,15 +156,14 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         except Exception as e:
             print(f"심박 보정 실패 (계속 진행): {e}")
 
-        # 4. 이번 주 활동 가져오기 (실패하면 빈 리스트)
+        # 4. 이번 주 활동 가져오기
         weekly = []
         try:
             weekly = await get_weekly_activities(athlete_id)
         except Exception as e:
             print(f"주간 활동 가져오기 실패 (계속 진행): {e}")
 
-        # 5. DB 저장 (실패해도 계속)
-        activity_db_id = 0
+        # 5. DB 저장
         try:
             activity_db_id = save_activity(activity)
             save_splits(activity_db_id, activity.splits)
@@ -171,45 +171,51 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             print(f"DB 저장 실패 (계속 진행): {e}")
             await send_message(f"⚠️ DB 저장 실패: {str(e)}")
 
-        # 6. Claude 분석 (실패하면 기본 메시지만)
-        analysis = ""
+        # 6. 첫 번째 메시지: 운동 요약 즉시 전송
+        try:
+            summary_message = format_activity_message(activity, weather)
+            await send_message(summary_message)
+        except Exception as e:
+            print(f"운동 요약 전송 실패: {e}")
+
+        # 7. Claude 분석
+        analysis_text = ""
+        analysis_dict = None
         schedule = ""
         try:
-            analysis = await analyze_activity(activity, weekly, weather, hr_correction)
+            analysis_text = await analyze_activity(activity, weekly, weather, hr_correction)
+            analysis_dict = parse_claude_response(analysis_text)
             schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
         except Exception as e:
-            print(f"Claude 분석 실패 (기본 메시지만 전송): {e}")
-            await send_message(f"⚠️ AI 분석 실패, 운동 요약만 전송해요.")
+            print(f"Claude 분석 실패: {e}")
 
-        # 7. 텔레그램 전송 (실패하면 로그만)
+        # 8. 두 번째 메시지: AI 분석 전송
         try:
-            message = format_activity_message(activity, weather)
-            if analysis:
-                message += f"\n\n🤖 <b>AI 코치 분석</b>\n{analysis}"
-            if schedule:
-                message += f"\n\n📅 <b>다음 주 훈련 스케줄</b>\n{schedule}"
-            await send_message(message)
+            if analysis_dict:
+                analysis_message = format_analysis_message(analysis_dict, schedule)
+            else:
+                # JSON 파싱 실패 시 텍스트 그대로
+                print("JSON 파싱 실패, 텍스트로 전송")
+                analysis_message = f"🤖 <b>AI 코치 분석</b>\n{analysis_text}"
+                if schedule:
+                    analysis_message += f"\n\n📅 <b>다음 주 스케줄</b>\n{schedule}"
+            await send_message(analysis_message)
         except Exception as e:
-            print(f"텔레그램 전송 실패: {e}")
+            print(f"AI 분석 전송 실패: {e}")
 
         # 터미널 출력
         print(f"=== 운동 분석 완료 ===")
         print(f"날짜: {activity.date}")
         print(f"거리: {activity.distance_km} km")
-        print(f"시간: {activity.moving_time}")
-        print(f"평균 페이스: {activity.pace}")
-        print(f"평균 심박: {activity.avg_heartrate} bpm")
+        print(f"페이스: {activity.pace}")
+        print(f"심박: {activity.avg_heartrate} bpm")
         if activity.pr_rank == 1:
             print(f"🏆 역대 최고 페이스!")
         elif activity.pr_rank:
             print(f"기록 순위: {activity.pr_rank}위")
-        print(f"\n--- km별 구간 분석 ---")
-        for s in activity.splits:
-            print(f"{s.km}km: 페이스 {s.pace} | 심박 {s.avg_heartrate} bpm")
         print(f"====================")
 
     except Exception as e:
-        # 예상치 못한 전체 에러
         print(f"예상치 못한 에러: {activity_id}, {e}")
         try:
             await send_message(f"⚠️ 예상치 못한 오류가 발생했어요.\n{str(e)}")
@@ -233,6 +239,7 @@ async def test_weather():
 async def test_notion():
     weekly = await get_weekly_activities(196195036)
     analysis = await generate_weekly_analysis(weekly)
+
     empty_activity = {
         "distance_km": 0,
         "pace": "N/A",
