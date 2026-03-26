@@ -33,7 +33,7 @@ async def strava_login():
     auth_url = (
         f"https://www.strava.com/oauth/authorize"
         f"?client_id={config.STRAVA_CLIENT_ID}"
-        f"&redirect_uri=https://legendary-treatment-keyword-amd.trycloudflare.com/strava/callback"
+        f"&redirect_uri=https://trivia-physically-bracelet-johnston.trycloudflare.com/strava/callback"
         f"&response_type=code"
         f"&scope=activity:read_all"
     )
