@@ -71,7 +71,7 @@ async def analyze_activity(
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석해주세요.
 
 ## 오늘 운동 데이터
-- 날짜: {activity.date}
+- 날짜: {activity.date_display}
 - 운동명: {activity.name}
 - 거리: {activity.distance_km}km
 - 시간: {activity.moving_time}

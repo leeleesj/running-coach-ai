@@ -42,9 +42,8 @@ async def refresh_access_token(athlete_id: int) -> str | None:
     token_data = response.json()
     new_access_token = token_data["access_token"]
     new_refresh_token = token_data["refresh_token"]
-    new_expires_at = token_data["expires_at"]  # Unix timestamp
+    new_expires_at = token_data["expires_at"]
 
-    # DB 업데이트
     update_tokens(athlete_id, new_access_token, new_refresh_token, new_expires_at)
 
     return new_access_token
@@ -82,7 +81,6 @@ async def get_weekly_activities(athlete_id: int) -> list:
     if not access_token:
         return []
 
-    # 이번 주 월요일 00:00 타임스탬프
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())
     monday_ts = int(monday.replace(hour=0, minute=0, second=0).timestamp())
@@ -110,6 +108,7 @@ async def get_all_activities(athlete_id: int, per_page: int = 200) -> list:
     """
     전체 활동 히스토리 가져오기 (과거 데이터 동기화용)
     페이지네이션으로 모든 활동 조회
+    과거→최신 순서로 반환
     """
     access_token = await refresh_access_token(athlete_id)
     if not access_token:
@@ -146,16 +145,20 @@ async def get_all_activities(athlete_id: int, per_page: int = 200) -> list:
 
             page += 1
 
+    # 과거→최신 순서로 뒤집기 (시계열 저장)
+    all_activities.reverse()
+
     print(f"전체 활동 {len(all_activities)}개 가져오기 완료!")
     return all_activities
 
 
-def parse_activity(raw: dict) -> dict:
+def parse_activity(raw: dict) -> ActivityData:
     """
-    Strava raw 데이터를 사람이 읽기 좋은 형태로 변환
+    Strava raw 데이터를 ActivityData Pydantic 모델로 변환
 
-    Strava는 거리를 미터, 시간을 초, 속도를 m/s로 줌
-    우리는 km, 분:초, 분/km 페이스로 변환
+    날짜:
+    - date: ISO 형식 "2026-03-24T20:28:00" (정렬/계산/시계열 분석용)
+    - date_display: 한국어 형식 "2026년 3월 24일 20:28" (텔레그램 표시용)
     """
 
     def seconds_to_pace(speed_ms: float) -> str:
@@ -198,13 +201,17 @@ def parse_activity(raw: dict) -> dict:
     trend = similar.get("trend", {})
     trend_direction = trend.get("direction")
 
-    # 날짜
+    # 날짜 파싱
     start_date_str = raw.get("start_date_local", "")
     try:
         dt = datetime.strptime(start_date_str, "%Y-%m-%dT%H:%M:%SZ")
-        start_date_formatted = dt.strftime("%Y년 %-m월 %-d일 %H:%M")
+        # ISO 형식: 정렬/계산/시계열 분석용
+        date_iso = dt.strftime("%Y-%m-%dT%H:%M:%S")
+        # 한국어 형식: 텔레그램 표시용
+        date_display = dt.strftime("%Y년 %-m월 %-d일 %H:%M")
     except Exception:
-        start_date_formatted = start_date_str
+        date_iso = start_date_str
+        date_display = start_date_str
 
     # km별 구간 분석 (splits_metric)
     splits = []
@@ -229,7 +236,8 @@ def parse_activity(raw: dict) -> dict:
         type=raw.get("sport_type", "Run"),
         workout_type=raw.get("workout_type"),
         device_name=raw.get("device_name"),
-        date=start_date_formatted,
+        date=date_iso,           # ISO 형식 (DB 저장, 정렬용)
+        date_display=date_display,  # 한국어 형식 (텔레그램 표시용)
         distance_km=distance_km,
         moving_time=seconds_to_time(moving_time_sec),
         moving_time_sec=moving_time_sec,

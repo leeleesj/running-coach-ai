@@ -24,7 +24,12 @@ class ActivityData(BaseModel):
     type: str = "Run"
     workout_type: Optional[int] = None
     device_name: Optional[str] = None
+
+    # 날짜
+    # date: ISO 형식 "2026-03-24T20:28:00" → DB 저장, 정렬, 시계열 분석용
+    # date_display: 한국어 형식 "2026년 3월 24일 20:28" → 텔레그램 표시용
     date: str
+    date_display: str = ""
 
     # 거리/시간
     distance_km: float

@@ -75,7 +75,7 @@ def format_activity_message(activity: "ActivityData", weather: dict = None) -> s
         splits_text += f"  {s.km}km {s.pace} 💓{s.avg_heartrate}bpm\n"
 
     message = f"""🏃 <b>러닝 완료!</b>
-📅 {activity.date}
+📅 {activity.date_display}
 📍 {activity.name}{weather_text}
 
 <b>거리</b> {activity.distance_km}km  <b>시간</b> {activity.moving_time}
