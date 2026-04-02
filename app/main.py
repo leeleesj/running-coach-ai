@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 
 import app.config as config
-from app.ai.claude import analyze_activity, generate_weekly_schedule, parse_claude_response
+from app.ai.local_llm import analyze_activity, generate_weekly_schedule, parse_llm_response
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed
@@ -178,16 +178,16 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         except Exception as e:
             print(f"운동 요약 전송 실패: {e}")
 
-        # 7. Claude 분석
+        # 7. LLM 분석
         analysis_text = ""
         analysis_dict = None
         schedule = ""
         try:
             analysis_text = await analyze_activity(activity, weekly, weather, hr_correction)
-            analysis_dict = parse_claude_response(analysis_text)
+            analysis_dict = parse_llm_response(analysis_text)
             schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
         except Exception as e:
-            print(f"Claude 분석 실패: {e}")
+            print(f"LLM 분석 실패: {e}")
 
         # 8. 두 번째 메시지: AI 분석 전송
         try:
