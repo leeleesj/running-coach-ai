@@ -109,13 +109,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS training_zones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER REFERENCES users(id),
-            zone1_max INTEGER DEFAULT 115,
-            zone2_max INTEGER DEFAULT 152,
-            zone3_max INTEGER DEFAULT 171,
-            zone4_max INTEGER DEFAULT 190,
-            zone5_max INTEGER DEFAULT 220,
-            max_heartrate INTEGER DEFAULT 220,
-            resting_heartrate INTEGER DEFAULT 60,
+            zone1_max INTEGER DEFAULT 138,
+            zone2_max INTEGER DEFAULT 150,
+            zone3_max INTEGER DEFAULT 162,
+            zone4_max INTEGER DEFAULT 174,
+            zone5_max INTEGER DEFAULT 999,
+            max_heartrate INTEGER DEFAULT 187,
+            resting_heartrate INTEGER DEFAULT 67,
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
@@ -180,6 +180,61 @@ def init_db():
     conn.commit()
     conn.close()
     print("DB 초기화 완료!")
+
+
+def get_training_zones(user_id: int = 1) -> dict:
+    """
+    유저의 훈련존 데이터 가져오기
+    없으면 애플워치 기반 기본값 반환
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT * FROM training_zones WHERE user_id = ?",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            "zone1_max": row["zone1_max"],
+            "zone2_max": row["zone2_max"],
+            "zone3_max": row["zone3_max"],
+            "zone4_max": row["zone4_max"],
+            "zone5_max": row["zone5_max"],
+            "max_heartrate": row["max_heartrate"],
+            "resting_heartrate": row["resting_heartrate"],
+        }
+
+    # DB에 없으면 애플워치 기반 기본값
+    return {
+        "zone1_max": 138,
+        "zone2_max": 150,
+        "zone3_max": 162,
+        "zone4_max": 174,
+        "zone5_max": 999,
+        "max_heartrate": 187,
+        "resting_heartrate": 67,
+    }
+
+
+def get_zone_for_heartrate(heartrate: float, zones: dict) -> str:
+    """
+    심박수로 존 이름 반환
+    프롬프트에서 "오늘 평균 심박은 존X입니다" 표현에 활용
+    """
+    if heartrate <= zones["zone1_max"]:
+        return "존1 (매우 가벼움)"
+    elif heartrate <= zones["zone2_max"]:
+        return "존2 (유산소 기반)"
+    elif heartrate <= zones["zone3_max"]:
+        return "존3 (유산소 파워)"
+    elif heartrate <= zones["zone4_max"]:
+        return "존4 (무산소 역치)"
+    else:
+        return "존5 (최대 강도)"
 
 
 def save_activity(parsed: "ActivityData", user_id: int = 1) -> int:
@@ -262,7 +317,6 @@ def save_activity(parsed: "ActivityData", user_id: int = 1) -> int:
 
     conn.commit()
 
-    # 저장된 activity의 db_id 가져오기
     cursor.execute(
         "SELECT id FROM activities WHERE strava_id = ?",
         (parsed.id,)
@@ -286,11 +340,9 @@ def save_splits(activity_db_id: int, splits: list) -> None:
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 기존 splits 삭제 후 재삽입
     cursor.execute("DELETE FROM splits WHERE activity_id = ?", (activity_db_id,))
 
     for split in splits:
-        # Pydantic 모델이면 속성으로, 딕셔너리면 get으로 접근
         if hasattr(split, "km"):
             cursor.execute("""
                 INSERT INTO splits (
