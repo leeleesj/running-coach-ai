@@ -213,3 +213,10 @@ __marimo__/
 data/
 
 docs/
+
+# 평가 파이프라인 생성 데이터 (DB에서 재생성 가능)
+evaluation/test_cases.json
+evaluation/results/
+
+# Claude Code 설정
+.claude/
