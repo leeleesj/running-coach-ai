@@ -33,6 +33,7 @@ load_dotenv()
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:14b"
+OLLAMA_MODEL_RAG = "qwen2.5:14b-ctx8k"  # RAG 평가용 (컨텍스트 8192)
 
 TEST_CASES_PATH = Path("evaluation/test_cases.json")
 RESULTS_DIR = Path("evaluation/results")
@@ -40,7 +41,40 @@ RESULTS_DIR = Path("evaluation/results")
 
 # ── Qwen 분석 ──────────────────────────────────────────────────────────────
 
-def build_qwen_prompt(activity: dict) -> str:
+def build_rag_context(activity: dict) -> str:
+    """Personal RAG + Knowledge RAG 컨텍스트 조회 (평가용)"""
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    parts = []
+
+    # Personal RAG
+    try:
+        from app.rag.personal_rag import get_personal_rag
+        rag = get_personal_rag()
+        if rag.collection.count() > 0:
+            ctx = rag.get_rag_context(activity)
+            if ctx:
+                parts.append(ctx)
+    except Exception as e:
+        print(f"  Personal RAG 조회 실패: {e}")
+
+    # Knowledge RAG
+    try:
+        from app.rag.knowledge_rag import get_knowledge_rag
+        krag = get_knowledge_rag()
+        if krag.collection.count() > 0:
+            ctx = krag.get_knowledge_context(
+                activity=activity,
+                avg_heartrate=activity.get("avg_heartrate", 0),
+            )
+            if ctx:
+                parts.append(ctx)
+    except Exception as e:
+        print(f"  Knowledge RAG 조회 실패: {e}")
+
+    return "\n\n".join(parts)
+
+
+def build_qwen_prompt(activity: dict, rag_context: str = "") -> str:
     """평가용 Qwen 프롬프트 (local_llm.py와 동일한 구조)"""
     splits = activity.get("splits", [])
     splits_text = ""
@@ -63,6 +97,8 @@ def build_qwen_prompt(activity: dict) -> str:
     pace_sec = activity.get("avg_pace_sec", 0)
     pace_str = f"{int(pace_sec//60)}:{int(pace_sec%60):02d} /km" if pace_sec else "N/A"
 
+    rag_section = f"\n{rag_context}\n" if rag_context else ""
+
     return f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석해주세요.
 
 ## 내 개인 심박존 (애플워치 기준, 반드시 준수)
@@ -80,7 +116,7 @@ def build_qwen_prompt(activity: dict) -> str:
 
 ## 러닝 용어 (반드시 아래 용어만 사용)
 - 존2 조깅, 템포런, 인터벌, LSD, 회복 조깅, 휴식
-
+{rag_section}
 ## 오늘 운동 데이터
 - 날짜: {activity.get('date', '')[:10]}
 - 거리: {activity.get('distance_km', 0)}km
@@ -111,16 +147,18 @@ def build_qwen_prompt(activity: dict) -> str:
     "pace": "목표 페이스",
     "heartrate": "목표 심박수 (개인 존 범위 내로)"
   }},
-  "marathon_status": "하프마라톤/10km PB 준비 현황 한 줄 요약"
+  "marathon_status": "하프마라톤/10km PB 준비 현황 한 줄 요약",
+  "progress": "과거 유사 운동과 비교한 오늘의 변화 (위 [과거 유사 운동 데이터]의 수치를 직접 인용할 것. 데이터 없으면 null)"
 }}"""
 
 
-async def call_qwen(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=120.0) as client:
+async def call_qwen(prompt: str, use_rag_model: bool = False) -> str:
+    model = OLLAMA_MODEL_RAG if use_rag_model else OLLAMA_MODEL
+    async with httpx.AsyncClient(timeout=180.0) as client:
         r = await client.post(
             f"{OLLAMA_BASE_URL}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
-                  "options": {"num_predict": 800, "temperature": 0.7}},
+            json={"model": model, "prompt": prompt, "stream": False,
+                  "options": {"num_predict": 900, "temperature": 0.7}},
         )
     if r.status_code != 200:
         raise RuntimeError(f"Ollama 에러: {r.status_code}")
@@ -199,7 +237,7 @@ async def run_judge(activity_text: str, llm_output: str, judge: str, repeat: int
 
 
 def parse_qwen_output(text: str) -> str:
-    """Qwen JSON 출력 → 읽기 좋은 텍스트"""
+    """Qwen JSON 출력 → 읽기 좋은 텍스트 (judge 입력용)"""
     try:
         data = parse_json_response(text)
         if not data:
@@ -209,10 +247,18 @@ def parse_qwen_output(text: str) -> str:
             lines.append(f"[총평] {data['summary']}")
         if data.get("heartrate_analysis"):
             lines.append(f"[심박] {data['heartrate_analysis']}")
+        if data.get("pace_analysis"):
+            lines.append(f"[페이스] {data['pace_analysis']}")
         if data.get("tomorrow"):
             t = data["tomorrow"]
             lines.append(f"[내일] {t.get('type','')} {t.get('distance','')} "
                          f"페이스:{t.get('pace','')} 심박:{t.get('heartrate','')}")
+        if data.get("marathon_status"):
+            lines.append(f"[마라톤] {data['marathon_status']}")
+        # progress 포함: judge가 개인화 평가 시 과거 비교 데이터를 볼 수 있도록
+        progress = data.get("progress")
+        if progress and progress != "null":
+            lines.append(f"[과거비교] {progress}")
         return "\n".join(lines) if lines else text
     except Exception:
         return text
@@ -294,7 +340,7 @@ def print_comparison(test_cases: list):
 
 # ── 메인 ────────────────────────────────────────────────────────────────────
 
-async def main(judge: str, skip_qwen: bool, repeat: int, compare_only: bool):
+async def main(judge: str, skip_qwen: bool, repeat: int, compare_only: bool, use_rag: bool):
     if not TEST_CASES_PATH.exists():
         print("test_cases.json 없음. 먼저 build_test_cases.py 실행하세요.")
         sys.exit(1)
@@ -305,38 +351,59 @@ async def main(judge: str, skip_qwen: bool, repeat: int, compare_only: bool):
         print_comparison(test_cases)
         return
 
+    # RAG 모드: 별도 필드 사용 (베이스라인 덮어쓰기 방지)
+    # use_rag="personal" → _rag 필드 (Personal RAG만)
+    # use_rag="full"     → _full_rag 필드 (Personal + Knowledge RAG)
+    if use_rag == "full":
+        suffix = "_full_rag"
+    elif use_rag:
+        suffix = "_rag"
+    else:
+        suffix = ""
+    qwen_key = f"qwen_output{suffix}"
+    score_key = f"final_scores_{judge}{suffix}"
+
+    if use_rag:
+        label_str = "Personal+Knowledge RAG" if use_rag == "full" else "Personal RAG"
+        print(f"RAG 모드 활성화 [{label_str}] (모델: {OLLAMA_MODEL_RAG}, 필드: {qwen_key} / {score_key})\n")
+
     total = len(test_cases)
-    score_key = f"final_scores_{judge}"
 
     for i, tc in enumerate(test_cases):
         print(f"\n[{i+1}/{total}] {tc['id']} | {tc['scenario']:15s} | "
               f"심박:{tc['activity']['avg_heartrate']:5.1f}bpm | 정답존:{tc['expected_zone']}")
 
         # Step 1: Qwen 분석
-        if not skip_qwen and not tc.get("qwen_output"):
+        if not skip_qwen and not tc.get(qwen_key):
             print("  Qwen 분석 중...")
             try:
-                tc["qwen_output"] = await call_qwen(build_qwen_prompt(tc["activity"]))
-                print(f"  완료 ({len(tc['qwen_output'])}자)")
+                rag_context = build_rag_context(tc["activity"]) if use_rag else ""
+                if use_rag:
+                    has_ctx = "RAG 컨텍스트 있음" if rag_context else "RAG 컨텍스트 없음"
+                    ctx_lines = len(rag_context.splitlines()) if rag_context else 0
+                    print(f"  {has_ctx} ({ctx_lines}줄)")
+                prompt = build_qwen_prompt(tc["activity"], rag_context=rag_context)
+                tc[qwen_key] = await call_qwen(prompt, use_rag_model=use_rag)
+                print(f"  완료 ({len(tc[qwen_key])}자)")
             except Exception as e:
                 print(f"  Qwen 실패: {e}")
                 continue
-        elif not tc.get("qwen_output"):
-            print("  qwen_output 없음, 건너뜀")
+        elif not tc.get(qwen_key):
+            print(f"  {qwen_key} 없음, 건너뜀")
             continue
         else:
-            print("  Qwen 출력 재사용")
+            print(f"  {qwen_key} 재사용")
 
         # Step 2: Judge 채점
         if tc.get(score_key):
             print(f"  [{judge}] 채점 이미 완료, 건너뜀")
             continue
 
-        qwen_text = parse_qwen_output(tc["qwen_output"])
+        qwen_text = parse_qwen_output(tc[qwen_key])
         scores = await run_judge(tc["activity_text"], qwen_text, judge=judge, repeat=repeat)
         if scores:
             tc[score_key] = scores
-            print(f"  [{judge}] 총점 {scores['total']}/25 | 정확성 {scores['accuracy']['score']}/5")
+            print(f"  [{judge}] 총점 {scores['total']}/25 | 정확성 {scores['accuracy']['score']}/5 | 개인화 {scores['personalization']['score']}/5")
         else:
             print(f"  [{judge}] 채점 실패")
 
@@ -346,20 +413,57 @@ async def main(judge: str, skip_qwen: bool, repeat: int, compare_only: bool):
     # 최종 결과 저장
     RESULTS_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = RESULTS_DIR / f"baseline_{judge}_{ts}.json"
+    label = f"rag_{judge}" if use_rag else f"baseline_{judge}"
+    out = RESULTS_DIR / f"{label}_{ts}.json"
     out.write_text(json.dumps(test_cases, ensure_ascii=False, indent=2))
     print(f"\n결과 저장: {out}")
 
-    # 두 judge 모두 완료됐으면 비교 출력
-    c_done = sum(1 for tc in test_cases if tc.get("final_scores_claude"))
-    q_done = sum(1 for tc in test_cases if tc.get("final_scores_qwen"))
-    if c_done > 0 and q_done > 0:
-        print_comparison(test_cases)
-    else:
-        judge_label = "Claude" if judge == "claude" else "Qwen"
-        print(f"\n{judge_label} Judge 완료 ({c_done if judge=='claude' else q_done}/{total})")
-        other = "qwen" if judge == "claude" else "claude"
-        print(f"비교 보려면: uv run python -m evaluation.run_evaluation --judge {other} --skip-qwen --repeat {repeat}")
+    # 최종 점수 요약
+    done = [tc for tc in test_cases if tc.get(score_key)]
+    if done:
+        criteria = ["accuracy", "specificity", "personalization", "practicality", "korean_quality"]
+        criteria_kr = ["정확성", "구체성", "개인화", "실용성", "한국어"]
+        print(f"\n{'='*50}")
+        mode_label = {"full": "Personal+Knowledge RAG"}.get(use_rag, "Personal RAG" if use_rag else "베이스라인")
+        print(f"{mode_label} | {judge.upper()} Judge | {len(done)}/{total}케이스")
+        print(f"{'='*50}")
+        for c, ck in zip(criteria, criteria_kr):
+            scores = [tc[score_key][c]["score"] for tc in done if c in tc.get(score_key, {})]
+            avg = round(sum(scores) / len(scores), 2) if scores else 0
+            print(f"  {ck:6s}: {avg:.2f}/5")
+        totals = [tc[score_key]["total"] for tc in done]
+        print(f"  {'총점':6s}: {round(sum(totals)/len(totals), 2):.2f}/25")
+        print(f"{'='*50}")
+
+    # 베이스라인 vs RAG 비교 (둘 다 있을 때)
+    if use_rag:
+        label_str = "Personal+Knowledge RAG" if use_rag == "full" else "Personal RAG"
+        base_done = [tc for tc in test_cases if tc.get(f"final_scores_{judge}")]
+        rag_done = [tc for tc in test_cases if tc.get(score_key)]
+        if base_done and rag_done:
+            criteria = ["accuracy", "specificity", "personalization", "practicality", "korean_quality"]
+            criteria_kr = ["정확성", "구체성", "개인화", "실용성", "한국어"]
+            print(f"\n{'='*60}")
+            print(f"  베이스라인 vs {label_str} 비교 ({judge.upper()} Judge)")
+            print(f"  {'항목':8s}  {'베이스라인':>10s}  {'RAG':>8s}  {'변화':>8s}")
+            print(f"{'='*60}")
+            for c, ck in zip(criteria, criteria_kr):
+                base_scores = [tc[f"final_scores_{judge}"][c]["score"] for tc in base_done if c in tc.get(f"final_scores_{judge}", {})]
+                rag_scores = [tc[score_key][c]["score"] for tc in rag_done if c in tc.get(score_key, {})]
+                base_avg = round(sum(base_scores)/len(base_scores), 2) if base_scores else 0
+                rag_avg = round(sum(rag_scores)/len(rag_scores), 2) if rag_scores else 0
+                diff = round(rag_avg - base_avg, 2)
+                diff_str = f"+{diff}" if diff > 0 else str(diff)
+                flag = " ✅" if diff >= 0.3 else (" ⚠️" if diff <= -0.3 else "")
+                print(f"  {ck:8s}  {base_avg:>6.2f}/5    {rag_avg:>5.2f}/5  {diff_str:>6s}{flag}")
+            base_totals = [tc[f"final_scores_{judge}"]["total"] for tc in base_done]
+            rag_totals = [tc[score_key]["total"] for tc in rag_done]
+            base_t = round(sum(base_totals)/len(base_totals), 2)
+            rag_t = round(sum(rag_totals)/len(rag_totals), 2)
+            diff_t = round(rag_t - base_t, 2)
+            diff_str = f"+{diff_t}" if diff_t > 0 else str(diff_t)
+            print(f"  {'총점':8s}  {base_t:>6.2f}/25   {rag_t:>5.2f}/25  {diff_str:>6s}")
+            print(f"{'='*60}")
 
 
 if __name__ == "__main__":
@@ -368,14 +472,19 @@ if __name__ == "__main__":
     parser.add_argument("--skip-qwen", action="store_true")
     parser.add_argument("--repeat", type=int, default=3, help="judge 반복 횟수 (기본 3)")
     parser.add_argument("--compare", action="store_true", help="저장된 결과 비교만 출력")
+    parser.add_argument("--rag", action="store_true", help="Personal RAG 주입 모드 (_rag 필드 저장)")
+    parser.add_argument("--full-rag", action="store_true", help="Personal+Knowledge RAG 주입 모드 (_full_rag 필드 저장)")
     args = parser.parse_args()
 
     if args.judge == "qwen" and not args.skip_qwen:
         print("⚠️  Qwen self-judge: 자기 출력 평가 편향 있음. 학습 목적으로만 사용.\n")
+
+    use_rag = "full" if args.full_rag else (True if args.rag else False)
 
     asyncio.run(main(
         judge=args.judge,
         skip_qwen=args.skip_qwen,
         repeat=args.repeat,
         compare_only=args.compare,
+        use_rag=use_rag,
     ))
