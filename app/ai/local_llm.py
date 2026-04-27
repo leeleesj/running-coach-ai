@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 # Ollama 설정
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:14b"
+OLLAMA_MODEL = "qwen2.5:14b-ctx8k"
 
 
 def parse_llm_response(text: str) -> dict | None:
@@ -107,15 +107,53 @@ async def analyze_activity(
     weekly_activities: list,
     weather: dict = None,
     hr_correction: dict = None,
+    activity_db_id: int = None,
 ) -> str:
     """
     운동 데이터를 로컬 LLM(Qwen)으로 분석
-    개인 훈련존 + 용어 사전 주입
+    개인 훈련존 + 용어 사전 + Personal RAG 컨텍스트 주입
     """
 
     # 이번 주 누적 데이터
     weekly_distance = sum(a.get("distance", 0) / 1000 for a in weekly_activities)
     weekly_count = len(weekly_activities)
+
+    # Personal RAG: 유사 과거 운동 비교 컨텍스트
+    rag_context = ""
+    activity_dict = {
+        "date": activity.date,
+        "distance_km": activity.distance_km,
+        "avg_pace_sec": activity.avg_pace_sec,
+        "avg_heartrate": activity.avg_heartrate,
+        "max_heartrate": activity.max_heartrate,
+        "avg_cadence": activity.avg_cadence,
+        "elevation_gain": activity.elevation_gain,
+        "calories": activity.calories,
+    }
+    try:
+        from app.rag.personal_rag import get_personal_rag
+        rag = get_personal_rag()
+        if rag.collection.count() > 0:
+            rag_context = rag.get_rag_context(activity_dict, exclude_db_id=activity_db_id)
+            if rag_context:
+                print("Personal RAG 컨텍스트 주입 완료")
+    except Exception as e:
+        print(f"Personal RAG 조회 실패 (무시하고 계속): {e}")
+
+    # Knowledge RAG: 러닝 전문 지식 컨텍스트
+    knowledge_context = ""
+    try:
+        from app.rag.knowledge_rag import get_knowledge_rag
+        krag = get_knowledge_rag()
+        if krag.collection.count() > 0:
+            knowledge_context = krag.get_knowledge_context(
+                activity=activity_dict,
+                avg_heartrate=activity.avg_heartrate,
+            )
+            if knowledge_context:
+                print("Knowledge RAG 컨텍스트 주입 완료")
+    except Exception as e:
+        print(f"Knowledge RAG 조회 실패 (무시하고 계속): {e}")
 
     # 개인 훈련존 가져오기
     zones = get_training_zones()
@@ -158,10 +196,18 @@ async def analyze_activity(
 - 설명: {hr_correction['comment']}
 """
 
+    # RAG 섹션: 존/용어 다음, 운동 데이터 바로 앞에 배치
+    rag_parts = []
+    if rag_context:
+        rag_parts.append(rag_context)
+    if knowledge_context:
+        rag_parts.append(knowledge_context)
+    rag_section = "\n" + "\n\n".join(rag_parts) + "\n" if rag_parts else ""
+
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석해주세요.
 {zones_text}
 {terminology_text}
-
+{rag_section}
 ## 오늘 운동 데이터
 - 날짜: {activity.date_display or activity.date}
 - 운동명: {activity.name}
@@ -200,7 +246,8 @@ async def analyze_activity(
     "pace": "목표 페이스 (존 기준에 맞게)",
     "heartrate": "목표 심박수 (개인 존 범위 내로)"
   }},
-  "marathon_status": "하프마라톤 준비 현황 한 줄 요약"
+  "marathon_status": "하프마라톤/10km PB 준비 현황 한 줄 요약",
+  "progress": "과거 유사 운동과 비교한 오늘의 변화 (위 [과거 유사 운동 데이터]의 수치를 직접 인용할 것. 데이터 없으면 null)"
 }}"""
 
     print(f"Ollama 분석 시작... (모델: {OLLAMA_MODEL})")

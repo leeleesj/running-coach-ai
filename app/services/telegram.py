@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import app.config as config
 from typing import TYPE_CHECKING
@@ -6,29 +7,42 @@ if TYPE_CHECKING:
     from app.models.activity import ActivityData
 
 
-async def send_message(text: str) -> bool:
+async def send_message(text: str, retries: int = 3) -> bool:
     """
-    텔레그램으로 메시지 전송
+    텔레그램으로 메시지 전송 (ConnectTimeout 대비 재시도 포함)
     parse_mode="HTML" 로 설정하면 <b>굵게</b> 등 HTML 태그 사용 가능
     """
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            url,
-            json={
-                "chat_id": config.TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-            }
-        )
+    for attempt in range(1, retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    url,
+                    json={
+                        "chat_id": config.TELEGRAM_CHAT_ID,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    }
+                )
 
-    if response.status_code != 200:
-        print(f"텔레그램 전송 실패: {response.status_code} {response.text}")
-        return False
+            if response.status_code != 200:
+                print(f"텔레그램 전송 실패: {response.status_code} {response.text}")
+                return False
 
-    print("텔레그램 전송 성공!")
-    return True
+            print("텔레그램 전송 성공!")
+            return True
+
+        except httpx.TimeoutException as e:
+            print(f"텔레그램 전송 타임아웃 (시도 {attempt}/{retries}): {e}")
+            if attempt < retries:
+                await asyncio.sleep(3)
+        except Exception as e:
+            print(f"텔레그램 전송 에러: {e}")
+            return False
+
+    print("텔레그램 전송 최종 실패 (재시도 소진)")
+    return False
 
 
 def format_activity_message(activity: "ActivityData", weather: dict = None) -> str:
@@ -88,12 +102,57 @@ def format_activity_message(activity: "ActivityData", weather: dict = None) -> s
     return message.strip()
 
 
-def format_analysis_message(analysis: dict, schedule: str) -> str:
+def _format_rag_comparison(comparison: list) -> str:
+    """
+    RAG 구조화 데이터 → telegram 표시용 텍스트
+    LLM 요약 없이 수치를 직접 표시
+    """
+    if not comparison:
+        return ""
+
+    lines = []
+    for item in comparison:
+        changes = []
+
+        pace_diff = item.get("pace_diff", 0)
+        if abs(pace_diff) >= 3:
+            changes.append(f"페이스 {abs(int(pace_diff))}초 {'향상' if pace_diff > 0 else '저하'}")
+        else:
+            changes.append("페이스 유사")
+
+        hr_diff = item.get("hr_diff", 0)
+        if abs(hr_diff) >= 2:
+            changes.append(f"심박 {abs(int(hr_diff))}bpm {'안정' if hr_diff > 0 else '상승'}")
+        else:
+            changes.append("심박 유사")
+
+        dist_diff = item.get("dist_diff", 0)
+        if abs(dist_diff) >= 0.5:
+            changes.append(f"거리 {abs(round(dist_diff, 1))}km {'증가' if dist_diff > 0 else '감소'}")
+
+        pace_sec = item.get("avg_pace_sec", 0)
+        pace_str = f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}/km" if pace_sec else "N/A"
+
+        lines.append(
+            f"• {item['period']} ({item['date']}) "
+            f"{item['distance_km']}km · {item['avg_heartrate']}bpm · {pace_str}\n"
+            f"  → {', '.join(changes)}"
+        )
+
+    return "\n".join(lines)
+
+
+def format_analysis_message(analysis: dict, schedule: str, rag_comparison: list = None) -> str:
     """
     AI 분석 메시지 (두 번째 메시지)
     Claude JSON 응답을 HTML로 포맷
+    rag_comparison: personal_rag.get_comparison_data() 결과 (구조화된 비교 데이터)
     """
     tomorrow = analysis.get("tomorrow", {})
+
+    # RAG 비교 섹션: LLM 요약 대신 수치 직접 표시
+    rag_text = _format_rag_comparison(rag_comparison or [])
+    rag_section = f"\n\n📊 <b>성장 기록</b>\n{rag_text}" if rag_text else ""
 
     message = f"""🤖 <b>AI 코치 분석</b>
 
@@ -104,7 +163,7 @@ def format_analysis_message(analysis: dict, schedule: str) -> str:
 {analysis.get('heartrate_analysis', '')}
 
 📈 <b>페이스 패턴</b>
-{analysis.get('pace_analysis', '')}
+{analysis.get('pace_analysis', '')}{rag_section}
 
 🏃 <b>내일 추천 훈련</b>
 • 종류: {tomorrow.get('type', 'N/A')}

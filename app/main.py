@@ -1,6 +1,7 @@
 import hmac
 import httpx
 import asyncio
+import traceback
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 
@@ -122,6 +123,10 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         print(f"새 운동 처리 시작! ID: {activity_id}")
 
         # 1. Strava 데이터 가져오기
+        # create 직후엔 Strava가 GPS 처리 중 → splits_metric 비어있을 수 있음
+        if aspect_type == "create":
+            print("create 이벤트: 30초 대기 (Strava GPS 처리 완료 후 fetch)")
+            await asyncio.sleep(30)
         raw = await get_activity(activity_id, athlete_id)
         if not raw:
             print(f"운동 데이터 가져오기 실패: {activity_id}")
@@ -164,12 +169,37 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             print(f"주간 활동 가져오기 실패 (계속 진행): {e}")
 
         # 5. DB 저장
+        activity_db_id = 0
         try:
             activity_db_id = save_activity(activity)
             save_splits(activity_db_id, activity.splits)
         except Exception as e:
             print(f"DB 저장 실패 (계속 진행): {e}")
             await send_message(f"⚠️ DB 저장 실패: {str(e)}")
+
+        # 5-1. Personal RAG 인덱스 업데이트 + 비교 데이터 수집
+        rag_comparison = []
+        try:
+            from app.rag.personal_rag import get_personal_rag
+            rag = get_personal_rag()
+            if rag.collection.count() > 0:  # 인덱스가 초기화된 경우에만
+                activity_dict = {
+                    "id": activity_db_id,
+                    "date": activity.date,
+                    "distance_km": activity.distance_km,
+                    "avg_pace_sec": activity.avg_pace_sec,
+                    "avg_heartrate": activity.avg_heartrate,
+                    "max_heartrate": activity.max_heartrate,
+                    "avg_cadence": activity.avg_cadence,
+                    "elevation_gain": activity.elevation_gain,
+                    "calories": activity.calories,
+                }
+                # 비교 데이터 먼저 수집 (upsert 전: 자기 자신 제외 불필요)
+                rag_comparison = rag.get_comparison_data(activity_dict)
+                rag.upsert_activity(activity_dict)
+                print(f"Personal RAG 인덱스 업데이트 완료 (유사 운동 {len(rag_comparison)}개)")
+        except Exception as e:
+            print(f"Personal RAG 업데이트 실패 (무시하고 계속): {e}")
 
         # 6. 첫 번째 메시지: 운동 요약 즉시 전송
         try:
@@ -183,7 +213,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         analysis_dict = None
         schedule = ""
         try:
-            analysis_text = await analyze_activity(activity, weekly, weather, hr_correction)
+            analysis_text = await analyze_activity(activity, weekly, weather, hr_correction, activity_db_id=activity_db_id)
             analysis_dict = parse_llm_response(analysis_text)
             schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
         except Exception as e:
@@ -192,7 +222,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         # 8. 두 번째 메시지: AI 분석 전송
         try:
             if analysis_dict:
-                analysis_message = format_analysis_message(analysis_dict, schedule)
+                analysis_message = format_analysis_message(analysis_dict, schedule, rag_comparison)
             else:
                 # JSON 파싱 실패 시 텍스트 그대로
                 print("JSON 파싱 실패, 텍스트로 전송")
@@ -202,6 +232,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             await send_message(analysis_message)
         except Exception as e:
             print(f"AI 분석 전송 실패: {e}")
+            traceback.print_exc()
 
         # 터미널 출력
         print(f"=== 운동 분석 완료 ===")
@@ -223,7 +254,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             pass
 
     finally:
-        await asyncio.sleep(300)
+        await asyncio.sleep(60)
         processing_ids.discard(activity_id)
 
 
