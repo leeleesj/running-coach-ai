@@ -142,17 +142,47 @@ def _format_rag_comparison(comparison: list) -> str:
     return "\n".join(lines)
 
 
-def format_analysis_message(analysis: dict, schedule: str, rag_comparison: list = None) -> str:
+def format_analysis_message(
+    analysis: dict,
+    rag_comparison: list = None,
+    planned_session: dict = None,
+    tomorrow_session: dict = None,
+) -> str:
     """
     AI 분석 메시지 (두 번째 메시지)
-    Claude JSON 응답을 HTML로 포맷
-    rag_comparison: personal_rag.get_comparison_data() 결과 (구조화된 비교 데이터)
+    analysis: LLM JSON 응답
+    rag_comparison: personal_rag.get_comparison_data() 결과
+    planned_session: 오늘 계획 세션 (plan vs actual 표시용)
+    tomorrow_session: 내일 계획 세션 (주간 계획 DB에서)
     """
-    tomorrow = analysis.get("tomorrow", {})
-
-    # RAG 비교 섹션: LLM 요약 대신 수치 직접 표시
+    # RAG 비교 섹션
     rag_text = _format_rag_comparison(rag_comparison or [])
     rag_section = f"\n\n📊 <b>성장 기록</b>\n{rag_text}" if rag_text else ""
+
+    # 계획 vs 실제 섹션
+    plan_vs_actual = analysis.get("plan_vs_actual")
+    plan_section = ""
+    if planned_session and planned_session.get("type", "휴식") != "휴식":
+        plan_section = f"\n\n📋 <b>계획 vs 실제</b>\n{plan_vs_actual or '-'}"
+
+    # 내일 훈련 섹션 (주간 계획 DB 기반)
+    tomorrow_section = ""
+    if tomorrow_session:
+        t_type = tomorrow_session.get("type", "휴식")
+        if t_type == "휴식" or tomorrow_session.get("distance_km", 0) == 0:
+            tomorrow_section = "\n\n🏃 <b>내일 계획</b>\n• 휴식"
+        else:
+            tomorrow_section = (
+                f"\n\n🏃 <b>내일 계획</b>\n"
+                f"• 종류: {t_type}\n"
+                f"• 거리: {tomorrow_session.get('distance_km', '-')}km\n"
+                f"• 페이스: {tomorrow_session.get('pace', '-')}\n"
+                f"• 심박: {tomorrow_session.get('heartrate', '-')}bpm"
+            )
+
+    # 성장 기록 (progress)
+    progress = analysis.get("progress")
+    progress_section = f"\n\n📈 <b>성장 기록</b>\n{progress}" if progress else ""
 
     message = f"""🤖 <b>AI 코치 분석</b>
 
@@ -162,19 +192,7 @@ def format_analysis_message(analysis: dict, schedule: str, rag_comparison: list 
 💓 <b>심박수 분석</b>
 {analysis.get('heartrate_analysis', '')}
 
-📈 <b>페이스 패턴</b>
-{analysis.get('pace_analysis', '')}{rag_section}
-
-🏃 <b>내일 추천 훈련</b>
-• 종류: {tomorrow.get('type', 'N/A')}
-• 거리: {tomorrow.get('distance', 'N/A')}
-• 페이스: {tomorrow.get('pace', 'N/A')}
-• 심박: {tomorrow.get('heartrate', 'N/A')}
-
-🎯 <b>하프마라톤 준비</b>
-{analysis.get('marathon_status', '')}
-
-📅 <b>다음 주 스케줄</b>
-{schedule}"""
+⚡ <b>페이스 패턴</b>
+{analysis.get('pace_analysis', '')}{plan_section}{rag_section}{progress_section}{tomorrow_section}"""
 
     return message.strip()

@@ -145,6 +145,62 @@ def init_db():
             photo_url TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        -- 훈련 목표 (복수 목표 지원)
+        CREATE TABLE IF NOT EXISTS goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            priority TEXT DEFAULT 'primary',   -- 'primary' / 'secondary'
+            event_type TEXT,                   -- '10km' / 'half' / 'full'
+            target_time_sec INTEGER,           -- 목표 기록 (초)
+            target_date TEXT,                  -- nullable, 대회 날짜
+            race_name TEXT,                    -- nullable, 대회명
+            race_confirmed INTEGER DEFAULT 0,  -- 0/1
+            status TEXT DEFAULT 'active',      -- 'active' / 'achieved' / 'abandoned'
+            weekly_days_available INTEGER DEFAULT 4,
+            max_weekly_km REAL DEFAULT 30,
+            injury_notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- 주간 훈련 계획 (매주 월요일 생성)
+        CREATE TABLE IF NOT EXISTS weekly_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            week_start TEXT UNIQUE,            -- ISO (월요일 날짜 YYYY-MM-DD)
+            plan_json TEXT,                    -- 7일 스케줄 JSON
+            total_planned_km REAL,
+            phase TEXT,                        -- 'base' / 'build' / 'peak' / 'taper'
+            acwr REAL,                         -- 생성 시점 ACWR
+            adherence_rate REAL,               -- 주 종료 후 업데이트 (%)
+            generated_at TEXT DEFAULT (datetime('now')),
+            notion_page_id TEXT                -- Notion에 기록된 페이지 ID
+        );
+
+        -- 월간 리포트 (매월 1일 생성)
+        CREATE TABLE IF NOT EXISTS monthly_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            year_month TEXT UNIQUE,            -- 'YYYY-MM'
+            total_km REAL,
+            total_sessions INTEGER,
+            adherence_rate REAL,
+            zone_distribution TEXT,            -- JSON {존1: %, 존2: %, ...}
+            fitness_assessment TEXT,           -- AI 평가 텍스트
+            goal_progress TEXT,               -- 목표 대비 진행률 텍스트
+            generated_at TEXT DEFAULT (datetime('now')),
+            notion_page_id TEXT
+        );
+
+        -- 신체 정보 히스토리
+        CREATE TABLE IF NOT EXISTS profile (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            height_cm REAL,
+            weight_kg REAL,
+            recorded_at TEXT DEFAULT (datetime('now'))
+        );
     """)
 
     # 기존 테이블에 새 컬럼 추가 (마이그레이션)
@@ -437,6 +493,237 @@ def update_tokens(athlete_id: int, access_token: str,
     conn.commit()
     conn.close()
     print(f"토큰 갱신 완료! expires_at={expires_at}")
+
+
+# ── Goals ────────────────────────────────────────────────────────────────────
+
+def get_active_goals(user_id: int = 1) -> list[dict]:
+    """활성 목표 목록 반환 (priority 순)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM goals WHERE user_id = ? AND status = 'active' ORDER BY priority ASC",
+        (user_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_goal(user_id: int, priority: str, event_type: str,
+                target_time_sec: int, target_date: str = None,
+                race_name: str = None, race_confirmed: bool = False,
+                weekly_days_available: int = 4, max_weekly_km: float = 30,
+                injury_notes: str = None) -> int:
+    """목표 저장 (같은 priority + event_type이면 업데이트)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO goals (
+            user_id, priority, event_type, target_time_sec, target_date,
+            race_name, race_confirmed, weekly_days_available, max_weekly_km,
+            injury_notes, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT DO NOTHING
+    """, (user_id, priority, event_type, target_time_sec, target_date,
+          race_name, 1 if race_confirmed else 0,
+          weekly_days_available, max_weekly_km, injury_notes))
+
+    # 이미 있으면 업데이트
+    cursor.execute("""
+        UPDATE goals SET
+            target_time_sec = ?, target_date = ?, race_name = ?,
+            race_confirmed = ?, weekly_days_available = ?, max_weekly_km = ?,
+            injury_notes = ?, updated_at = datetime('now')
+        WHERE user_id = ? AND priority = ? AND event_type = ? AND status = 'active'
+    """, (target_time_sec, target_date, race_name,
+          1 if race_confirmed else 0, weekly_days_available, max_weekly_km,
+          injury_notes, user_id, priority, event_type))
+
+    conn.commit()
+    goal_id = cursor.lastrowid
+    conn.close()
+    return goal_id
+
+
+# ── Weekly Plans ─────────────────────────────────────────────────────────────
+
+def get_current_weekly_plan(user_id: int = 1) -> dict | None:
+    """이번 주(가장 최근) 주간 계획 반환"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM weekly_plans WHERE user_id = ?
+        ORDER BY week_start DESC LIMIT 1
+    """, (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_weekly_plan_by_date(date_str: str, user_id: int = 1) -> dict | None:
+    """특정 날짜가 속한 주간 계획 반환"""
+    from datetime import datetime, timedelta
+    d = datetime.fromisoformat(date_str[:10])
+    monday = d - timedelta(days=d.weekday())
+    week_start = monday.strftime("%Y-%m-%d")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM weekly_plans WHERE user_id = ? AND week_start = ?",
+        (user_id, week_start)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def save_weekly_plan(user_id: int, week_start: str, plan_json: str,
+                     total_planned_km: float, phase: str, acwr: float,
+                     notion_page_id: str = None) -> int:
+    """주간 계획 저장 (같은 week_start면 업데이트)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO weekly_plans (
+            user_id, week_start, plan_json, total_planned_km, phase, acwr, notion_page_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(week_start) DO UPDATE SET
+            plan_json = excluded.plan_json,
+            total_planned_km = excluded.total_planned_km,
+            phase = excluded.phase,
+            acwr = excluded.acwr,
+            generated_at = datetime('now')
+    """, (user_id, week_start, plan_json, total_planned_km, phase, acwr, notion_page_id))
+    conn.commit()
+    plan_id = cursor.lastrowid
+    conn.close()
+    return plan_id
+
+
+def update_weekly_adherence(week_start: str, adherence_rate: float, user_id: int = 1):
+    """주 종료 후 이행도 업데이트"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE weekly_plans SET adherence_rate = ? WHERE user_id = ? AND week_start = ?",
+        (adherence_rate, user_id, week_start)
+    )
+    conn.commit()
+    conn.close()
+
+
+# ── ACWR 계산 ─────────────────────────────────────────────────────────────────
+
+def calculate_acwr(user_id: int = 1) -> dict:
+    """
+    ACWR (Acute:Chronic Workload Ratio) 계산
+    - Acute load: 최근 7일 총 거리
+    - Chronic load: 최근 28일 평균 주간 거리
+    - 안전 범위: 0.8~1.3
+    """
+    from datetime import datetime, timedelta
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    now = datetime.now()
+    d7 = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    d28 = (now - timedelta(days=28)).strftime("%Y-%m-%d")
+
+    cursor.execute(
+        "SELECT COALESCE(SUM(distance_km), 0) FROM activities WHERE user_id = ? AND date >= ?",
+        (user_id, d7)
+    )
+    acute_km = cursor.fetchone()[0]
+
+    cursor.execute(
+        "SELECT COALESCE(SUM(distance_km), 0) FROM activities WHERE user_id = ? AND date >= ?",
+        (user_id, d28)
+    )
+    chronic_total = cursor.fetchone()[0]
+    chronic_weekly = chronic_total / 4
+
+    conn.close()
+
+    acwr = round(acute_km / chronic_weekly, 2) if chronic_weekly > 0 else 1.0
+    return {
+        "acwr": acwr,
+        "acute_km": round(acute_km, 1),
+        "chronic_weekly_km": round(chronic_weekly, 1),
+        "risk": "위험" if acwr > 1.5 else ("주의" if acwr > 1.3 else "안전"),
+    }
+
+
+# ── Monthly Reports ──────────────────────────────────────────────────────────
+
+def save_monthly_report(user_id: int, year_month: str, total_km: float,
+                        total_sessions: int, adherence_rate: float,
+                        zone_distribution: str, fitness_assessment: str,
+                        goal_progress: str, notion_page_id: str = None) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO monthly_reports (
+            user_id, year_month, total_km, total_sessions, adherence_rate,
+            zone_distribution, fitness_assessment, goal_progress, notion_page_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(year_month) DO UPDATE SET
+            total_km = excluded.total_km,
+            total_sessions = excluded.total_sessions,
+            adherence_rate = excluded.adherence_rate,
+            zone_distribution = excluded.zone_distribution,
+            fitness_assessment = excluded.fitness_assessment,
+            goal_progress = excluded.goal_progress,
+            generated_at = datetime('now')
+    """, (user_id, year_month, total_km, total_sessions, adherence_rate,
+          zone_distribution, fitness_assessment, goal_progress, notion_page_id))
+    conn.commit()
+    report_id = cursor.lastrowid
+    conn.close()
+    return report_id
+
+
+def get_monthly_activities(year_month: str, user_id: int = 1) -> list[dict]:
+    """특정 월의 운동 목록 반환 (YYYY-MM)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT date, distance_km, avg_heartrate, avg_pace_sec, avg_cadence, elevation_gain
+        FROM activities
+        WHERE user_id = ? AND date LIKE ? AND distance_km > 0
+        ORDER BY date ASC
+    """, (user_id, f"{year_month}%"))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Profile ──────────────────────────────────────────────────────────────────
+
+def save_profile(user_id: int, weight_kg: float, height_cm: float = None) -> None:
+    """신체 정보 기록 (히스토리 누적)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO profile (user_id, height_cm, weight_kg) VALUES (?, ?, ?)",
+        (user_id, height_cm, weight_kg)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_latest_profile(user_id: int = 1) -> dict | None:
+    """가장 최근 신체 정보 반환"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM profile WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def is_already_processed(strava_id: int) -> bool:

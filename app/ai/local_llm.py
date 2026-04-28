@@ -108,10 +108,12 @@ async def analyze_activity(
     weather: dict = None,
     hr_correction: dict = None,
     activity_db_id: int = None,
+    planned_session: dict = None,
 ) -> str:
     """
     운동 데이터를 로컬 LLM(Qwen)으로 분석
-    개인 훈련존 + 용어 사전 + Personal RAG 컨텍스트 주입
+    개인 훈련존 + 용어 사전 + Personal RAG + 계획 세션 컨텍스트 주입
+    planned_session: 오늘 주간 계획에서 가져온 세션 (없으면 None)
     """
 
     # 이번 주 누적 데이터
@@ -204,6 +206,17 @@ async def analyze_activity(
         rag_parts.append(knowledge_context)
     rag_section = "\n" + "\n\n".join(rag_parts) + "\n" if rag_parts else ""
 
+    # 오늘 계획 세션 텍스트 (있을 때만)
+    plan_section = ""
+    if planned_session and planned_session.get("type", "휴식") != "휴식":
+        plan_section = f"""
+## 오늘 계획 세션
+- 종류: {planned_session.get('type', '-')}
+- 계획 거리: {planned_session.get('distance_km', 0)}km
+- 계획 페이스: {planned_session.get('pace', '-')}
+- 계획 심박: {planned_session.get('heartrate', '-')}bpm
+"""
+
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석해주세요.
 {zones_text}
 {terminology_text}
@@ -224,14 +237,10 @@ async def analyze_activity(
 ## km별 구간 데이터 (존 분석 포함)
 {splits_text}
 {weather_text}
-{hr_correction_text}
+{hr_correction_text}{plan_section}
 ## 이번 주 누적
 - 총 운동 횟수: {weekly_count}회
 - 총 거리: {round(weekly_distance, 2)}km
-
-## 목표
-- 4월 26일 하프마라톤 완주 (21.1km)
-- 심박수 안정화 (존2 훈련 비율 높이기)
 
 ## 응답 형식
 반드시 아래 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트는 절대 포함하지 마세요:
@@ -240,13 +249,7 @@ async def analyze_activity(
   "summary": "오늘 운동 총평 (2~3문장, 존 정보 포함)",
   "heartrate_analysis": "심박수 존 분석 (개인 존 기준으로 정확하게, 2~3문장)",
   "pace_analysis": "구간별 페이스 패턴 분석 (2~3문장)",
-  "tomorrow": {{
-    "type": "훈련 종류 (휴식/존2 조깅/템포런/인터벌/LSD 중 하나)",
-    "distance": "거리 (예: 5km)",
-    "pace": "목표 페이스 (존 기준에 맞게)",
-    "heartrate": "목표 심박수 (개인 존 범위 내로)"
-  }},
-  "marathon_status": "하프마라톤/10km PB 준비 현황 한 줄 요약",
+  "plan_vs_actual": "계획 대비 실제 비교 (계획이 있으면 거리/페이스/심박 차이 언급, 계획 없으면 null)",
   "progress": "과거 유사 운동과 비교한 오늘의 변화 (위 [과거 유사 운동 데이터]의 수치를 직접 인용할 것. 데이터 없으면 null)"
 }}"""
 

@@ -1,149 +1,188 @@
+"""
+Notion 쓰기 서비스 (P1-06)
+
+시스템이 Notion에 자동으로 기록하는 세 가지:
+  1. 훈련 일지: 운동 완료 시 (계획 vs 실적)
+  2. 주간 계획: 매주 월요일
+  3. 월간 리포트: 매월 1일
+"""
+
 import httpx
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
+
 import app.config as config
 
+NOTION_API = "https://api.notion.com/v1"
+NOTION_VERSION = "2022-06-28"
 
-async def create_weekly_report(
-    weekly_activities: list,
-    analysis: str,
-    schedule: str,
-) -> bool:
+
+def _headers() -> dict:
+    return {
+        "Authorization": f"Bearer {config.NOTION_API_KEY}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def _rich_text(content: str) -> list:
+    """Notion rich_text 프로퍼티 형식"""
+    return [{"text": {"content": str(content)[:2000]}}]
+
+
+async def post_training_log(
+    activity: dict,
+    planned_session: dict | None,
+    ai_comment: str = "",
+) -> str | None:
     """
-    주간 리포트를 Notion DB에 생성
-    매주 일요일 크론잡으로 호출 예정
+    운동 완료 시 훈련 일지 DB에 기록
+    반환: 생성된 Notion 페이지 ID (실패 시 None)
     """
+    if not config.NOTION_TRAINING_LOG_DB_ID:
+        return None
 
-    # 이번 주 날짜 범위 계산
-    today = datetime.now()
-    monday = today - timedelta(days=today.weekday())
-    sunday = monday + timedelta(days=6)
-    week_str = f"{monday.strftime('%Y년 %-m월 %-d일')} ~ {sunday.strftime('%-m월 %-d일')}"
+    date_str = activity.get("date", "")[:10]
+    distance_km = activity.get("distance_km", 0)
+    avg_hr = activity.get("avg_heartrate", 0)
+    pace_sec = activity.get("avg_pace_sec", 0)
+    pace_str = f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}/km" if pace_sec else "N/A"
 
-    # 몇 주차인지 계산
-    week_number = today.isocalendar()[1]
-    month = today.month
-    title = f"{today.year}년 {month}월 {week_number}주차 리포트"
-
-    # 이번 주 누적 통계
-    total_distance = round(sum(a.get("distance", 0) / 1000 for a in weekly_activities), 2)
-    total_count = len(weekly_activities)
-
-    # 평균 페이스 계산
-    avg_speeds = [a.get("average_speed", 0) for a in weekly_activities if a.get("average_speed", 0) > 0]
-    if avg_speeds:
-        avg_speed = sum(avg_speeds) / len(avg_speeds)
-        pace_sec = 1000 / avg_speed
-        avg_pace = f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d} /km"
+    # 계획 대비
+    if planned_session and planned_session.get("type", "휴식") != "휴식":
+        plan_type = planned_session.get("type", "-")
+        plan_km = planned_session.get("distance_km", 0)
+        adherence = "✅ 완수" if distance_km >= plan_km * 0.8 else "⚠️ 미완수"
     else:
-        avg_pace = "N/A"
+        plan_type = "계획 없음"
+        plan_km = 0
+        adherence = "-"
 
-    # 평균 심박수
-    heartrates = [a.get("average_heartrate", 0) for a in weekly_activities if a.get("average_heartrate")]
-    avg_heartrate = round(sum(heartrates) / len(heartrates), 1) if heartrates else 0
+    title = f"{date_str} {activity.get('name', '러닝')}"
 
-    # Notion API 호출
-    url = "https://api.notion.com/v1/pages"
+    props = {
+        "이름": {"title": _rich_text(title)},
+        "날짜": {"date": {"start": date_str}},
+        "실제 종류": {"rich_text": _rich_text(activity.get("training_type", "러닝"))},
+        "실제 거리": {"number": round(distance_km, 2)},
+        "평균 심박": {"number": round(avg_hr, 1) if avg_hr else 0},
+        "평균 페이스": {"rich_text": _rich_text(pace_str)},
+        "계획 종류": {"rich_text": _rich_text(plan_type)},
+        "계획 거리": {"number": plan_km},
+        "이행": {"rich_text": _rich_text(adherence)},
+        "AI 코멘트": {"rich_text": _rich_text(ai_comment[:500])},
+    }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {config.NOTION_API_KEY}",
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json",
-            },
-            json={
-                "parent": {"database_id": config.NOTION_DATABASE_ID},
-                "properties": {
-                    "이름": {
-                        "title": [{"text": {"content": title}}]
-                    },
-                    "기간": {
-                        "date": {
-                            "start": monday.strftime("%Y-%m-%d"),
-                            "end": sunday.strftime("%Y-%m-%d"),
-                        }
-                    },
-                    "총 거리": {"number": total_distance},
-                    "운동 횟수": {"number": total_count},
-                    "평균 페이스": {"rich_text": [{"text": {"content": avg_pace}}]},
-                    "평균 심박": {"number": avg_heartrate},
-                    "AI 분석": {"rich_text": [{"text": {"content": analysis[:2000]}}]},
-                    "다음주 스케줄": {"rich_text": [{"text": {"content": schedule[:2000]}}]},
-                },
-            }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{NOTION_API}/pages",
+            headers=_headers(),
+            json={"parent": {"database_id": config.NOTION_TRAINING_LOG_DB_ID}, "properties": props},
         )
 
-    if response.status_code != 200:
-        print(f"Notion API 에러: {response.status_code} {response.text}")
-        return False
+    if resp.status_code != 200:
+        print(f"Notion 훈련 일지 기록 실패: {resp.status_code} {resp.text[:200]}")
+        return None
 
-    print(f"Notion 주간 리포트 생성 완료! {title}")
-    return True
+    page_id = resp.json().get("id")
+    print(f"Notion 훈련 일지 기록 완료: {title}")
+    return page_id
 
 
-async def generate_weekly_analysis(weekly_activities: list) -> str:
+async def post_weekly_plan(plan: dict) -> str | None:
     """
-    이번 주 전체 훈련 패턴 분석 (Claude API 호출)
+    주간 계획을 Notion 주간 계획 DB에 기록
+    반환: 생성된 Notion 페이지 ID
     """
-    import httpx
+    if not config.NOTION_WEEKLY_PLAN_DB_ID:
+        return None
 
-    total_distance = round(sum(a.get("distance", 0) / 1000 for a in weekly_activities), 2)
-    total_count = len(weekly_activities)
+    week_start = plan.get("week_start", "")
+    phase = plan.get("phase", "base")
+    phase_kr = {"base": "베이스", "build": "빌드", "peak": "피크", "taper": "테이퍼"}.get(phase, phase)
+    total_km = plan.get("total_planned_km", 0)
+    comment = plan.get("weekly_comment", "")
 
-    # 운동 목록 텍스트
-    activities_text = ""
-    for a in weekly_activities:
-        date = a.get("start_date_local", "")[:10]
-        distance = round(a.get("distance", 0) / 1000, 2)
-        heartrate = a.get("average_heartrate", "N/A")
-        speed = a.get("average_speed", 0)
-        pace_sec = 1000 / speed if speed > 0 else 0
-        pace = f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}" if pace_sec else "N/A"
-        activities_text += f"  - {date}: {distance}km, 페이스 {pace}/km, 심박 {heartrate}bpm\n"
+    # 세션 요약 텍스트
+    day_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    day_keys = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    sessions = plan.get("sessions", {})
+    dates = plan.get("dates", {})
 
-    from datetime import datetime
-    goal_date = datetime(2026, 4, 26)
-    days_left = (goal_date - datetime.now()).days
+    schedule_lines = []
+    for kr, key in zip(day_kr, day_keys):
+        s = sessions.get(key, {})
+        date_str = dates.get(key, "")[:10]
+        s_type = s.get("type", "휴식")
+        if s_type == "휴식" or s.get("distance_km", 0) == 0:
+            schedule_lines.append(f"{kr}({date_str}) 휴식")
+        else:
+            schedule_lines.append(
+                f"{kr}({date_str}) {s_type} {s.get('distance_km')}km "
+                f"| {s.get('pace', '-')} | {s.get('heartrate', '-')}bpm"
+            )
 
-    prompt = f"""당신은 전문 러닝 코치입니다. 이번 주 훈련 데이터를 분석하고 한국어로 주간 리포트를 작성해주세요.
+    schedule_text = "\n".join(schedule_lines)
 
-## 이번 주 운동 목록
-{activities_text}
+    props = {
+        "이름": {"title": _rich_text(f"{week_start} 주간 계획 ({phase_kr})")},
+        "주 시작": {"date": {"start": week_start}},
+        "훈련 단계": {"rich_text": _rich_text(phase_kr)},
+        "목표 거리": {"number": total_km},
+        "스케줄": {"rich_text": _rich_text(schedule_text)},
+        "코멘트": {"rich_text": _rich_text(comment)},
+    }
 
-## 이번 주 누적
-- 총 횟수: {total_count}회
-- 총 거리: {total_distance}km
-
-## 목표
-- 하프마라톤 완주: 4월 26일 (D-{days_left})
-- 심박수 안정화 (존2 훈련 비율 높이기)
-
-## 요청
-1. 이번 주 훈련 총평 (3~4문장)
-2. 훈련 강도 분석 (존2 비율, 과부하 여부)
-3. 개선이 필요한 점
-4. 다음 주 핵심 목표
-
-간결하게 작성해주세요."""
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": config.CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1000,
-                "messages": [{"role": "user", "content": prompt}],
-            }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{NOTION_API}/pages",
+            headers=_headers(),
+            json={"parent": {"database_id": config.NOTION_WEEKLY_PLAN_DB_ID}, "properties": props},
         )
 
-    if response.status_code != 200:
-        return "분석 실패"
+    if resp.status_code != 200:
+        print(f"Notion 주간 계획 기록 실패: {resp.status_code} {resp.text[:200]}")
+        return None
 
-    result = response.json()
-    return result["content"][0]["text"]
+    page_id = resp.json().get("id")
+    print(f"Notion 주간 계획 기록 완료: {week_start}")
+    return page_id
+
+
+async def post_monthly_report(report: dict) -> str | None:
+    """
+    월간 리포트를 Notion 월간 리포트 DB에 기록
+    """
+    if not config.NOTION_MONTHLY_REPORT_DB_ID:
+        return None
+
+    ym = report.get("year_month", "")
+    zone_dist = report.get("zone_distribution", {})
+    zone_str = " | ".join(f"{k} {v}%" for k, v in zone_dist.items() if v > 0)
+
+    props = {
+        "이름": {"title": _rich_text(f"{ym} 월간 리포트")},
+        "월": {"rich_text": _rich_text(ym)},
+        "총 거리": {"number": report.get("total_km", 0)},
+        "운동 횟수": {"number": report.get("total_sessions", 0)},
+        "이행도": {"number": report.get("adherence_rate", 0)},
+        "존 분포": {"rich_text": _rich_text(zone_str)},
+        "피트니스 평가": {"rich_text": _rich_text(report.get("fitness_assessment", ""))},
+        "목표 진행": {"rich_text": _rich_text(report.get("goal_progress", ""))},
+        "다음 달 포인트": {"rich_text": _rich_text(report.get("next_month_focus", ""))},
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{NOTION_API}/pages",
+            headers=_headers(),
+            json={"parent": {"database_id": config.NOTION_MONTHLY_REPORT_DB_ID}, "properties": props},
+        )
+
+    if resp.status_code != 200:
+        print(f"Notion 월간 리포트 기록 실패: {resp.status_code} {resp.text[:200]}")
+        return None
+
+    page_id = resp.json().get("id")
+    print(f"Notion 월간 리포트 기록 완료: {ym}")
+    return page_id

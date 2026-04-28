@@ -2,26 +2,32 @@ import hmac
 import httpx
 import asyncio
 import traceback
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 
 import app.config as config
-from app.ai.local_llm import analyze_activity, generate_weekly_schedule, parse_llm_response
+from app.ai.local_llm import analyze_activity, parse_llm_response
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
 from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed
 from app.services.telegram import send_message, format_activity_message, format_analysis_message
-from app.services.notion import create_weekly_report, generate_weekly_analysis
+from app.services.scheduler import start_scheduler, stop_scheduler
 
-app = FastAPI(title="Running Coach AI")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI 라이프사이클 관리"""
+    init_db()
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(title="Running Coach AI", lifespan=lifespan)
 
 # 처리 중인 activity_id 추적 (중복 방지)
 processing_ids: set = set()
-
-
-@app.on_event("startup")
-async def startup():
-    init_db()
 
 
 @app.get("/health")
@@ -182,7 +188,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         try:
             from app.rag.personal_rag import get_personal_rag
             rag = get_personal_rag()
-            if rag.collection.count() > 0:  # 인덱스가 초기화된 경우에만
+            if rag.collection.count() > 0:
                 activity_dict = {
                     "id": activity_db_id,
                     "date": activity.date,
@@ -194,12 +200,27 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                     "elevation_gain": activity.elevation_gain,
                     "calories": activity.calories,
                 }
-                # 비교 데이터 먼저 수집 (upsert 전: 자기 자신 제외 불필요)
                 rag_comparison = rag.get_comparison_data(activity_dict)
                 rag.upsert_activity(activity_dict)
                 print(f"Personal RAG 인덱스 업데이트 완료 (유사 운동 {len(rag_comparison)}개)")
         except Exception as e:
             print(f"Personal RAG 업데이트 실패 (무시하고 계속): {e}")
+
+        # 5-2. 오늘 계획 세션 + 내일 계획 세션 조회 (주간 계획 DB)
+        planned_session = None
+        tomorrow_session = None
+        try:
+            from app.models.database import get_current_weekly_plan
+            from app.coaches.weekly_coach import get_today_planned_session, get_tomorrow_planned_session
+            import json
+            weekly_plan_row = get_current_weekly_plan()
+            if weekly_plan_row and weekly_plan_row.get("plan_json"):
+                weekly_plan = json.loads(weekly_plan_row["plan_json"])
+                planned_session = get_today_planned_session(weekly_plan)
+                tomorrow_session = get_tomorrow_planned_session(weekly_plan)
+                print(f"주간 계획 조회 완료: 오늘={planned_session and planned_session.get('type')}, 내일={tomorrow_session and tomorrow_session.get('type')}")
+        except Exception as e:
+            print(f"주간 계획 조회 실패 (무시하고 계속): {e}")
 
         # 6. 첫 번째 메시지: 운동 요약 즉시 전송
         try:
@@ -211,24 +232,50 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         # 7. LLM 분석
         analysis_text = ""
         analysis_dict = None
-        schedule = ""
         try:
-            analysis_text = await analyze_activity(activity, weekly, weather, hr_correction, activity_db_id=activity_db_id)
+            analysis_text = await analyze_activity(
+                activity, weekly, weather, hr_correction,
+                activity_db_id=activity_db_id,
+                planned_session=planned_session,
+            )
             analysis_dict = parse_llm_response(analysis_text)
-            schedule = await generate_weekly_schedule(activity, weekly, weather, hr_correction)
         except Exception as e:
             print(f"LLM 분석 실패: {e}")
+
+        # 7-1. Notion 훈련 일지 기록 (분석 완료 후)
+        ai_comment = ""
+        if analysis_dict:
+            ai_comment = analysis_dict.get("summary", "")
+        try:
+            from app.services.notion import post_training_log
+            await post_training_log(
+                activity={
+                    "date": activity.date,
+                    "name": activity.name,
+                    "distance_km": activity.distance_km,
+                    "avg_heartrate": activity.avg_heartrate,
+                    "avg_pace_sec": activity.avg_pace_sec,
+                    "training_type": activity.training_type,
+                },
+                planned_session=planned_session,
+                ai_comment=ai_comment,
+            )
+        except Exception as e:
+            print(f"Notion 훈련 일지 기록 실패 (무시하고 계속): {e}")
 
         # 8. 두 번째 메시지: AI 분석 전송
         try:
             if analysis_dict:
-                analysis_message = format_analysis_message(analysis_dict, schedule, rag_comparison)
+                analysis_message = format_analysis_message(
+                    analysis_dict,
+                    rag_comparison=rag_comparison,
+                    planned_session=planned_session,
+                    tomorrow_session=tomorrow_session,
+                )
             else:
                 # JSON 파싱 실패 시 텍스트 그대로
                 print("JSON 파싱 실패, 텍스트로 전송")
                 analysis_message = f"🤖 <b>AI 코치 분석</b>\n{analysis_text}"
-                if schedule:
-                    analysis_message += f"\n\n📅 <b>다음 주 스케줄</b>\n{schedule}"
             await send_message(analysis_message)
         except Exception as e:
             print(f"AI 분석 전송 실패: {e}")
@@ -266,26 +313,23 @@ async def test_weather():
     return weather
 
 
-@app.get("/test/notion")
-async def test_notion():
-    weekly = await get_weekly_activities(196195036)
-    analysis = await generate_weekly_analysis(weekly)
+@app.get("/test/weekly-coach")
+async def test_weekly_coach():
+    """주간 코치 수동 실행 (테스트용)"""
+    from app.coaches.weekly_coach import generate_weekly_plan, format_weekly_plan_message
+    plan = await generate_weekly_plan(user_id=1)
+    if not plan:
+        return {"error": "주간 계획 생성 실패"}
+    msg = format_weekly_plan_message(plan)
+    return {"plan": plan, "message": msg}
 
-    empty_activity = {
-        "distance_km": 0,
-        "pace": "N/A",
-        "avg_heartrate": 0,
-        "splits": [],
-        "moving_time": "0:00",
-        "max_pace": "N/A",
-        "max_heartrate": 0,
-        "avg_cadence": 0,
-        "calories": 0,
-        "elevation_gain": 0,
-        "pr_rank": None,
-        "name": "주간 스케줄 생성",
-        "date": "",
-    }
-    schedule = await generate_weekly_schedule(empty_activity, weekly)
-    result = await create_weekly_report(weekly, analysis, schedule)
-    return {"success": result, "analysis": analysis}
+
+@app.get("/test/monthly-coach")
+async def test_monthly_coach(year_month: str = None):
+    """월간 코치 수동 실행 (테스트용, year_month: YYYY-MM)"""
+    from app.coaches.monthly_coach import generate_monthly_report, format_monthly_report_message
+    report = await generate_monthly_report(user_id=1, year_month=year_month)
+    if not report:
+        return {"error": "월간 리포트 생성 실패"}
+    msg = format_monthly_report_message(report)
+    return {"report": report, "message": msg}
