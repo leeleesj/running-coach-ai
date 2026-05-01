@@ -153,6 +153,7 @@ def init_db():
             priority TEXT DEFAULT 'primary',   -- 'primary' / 'secondary'
             event_type TEXT,                   -- '10km' / 'half' / 'full'
             target_time_sec INTEGER,           -- 목표 기록 (초)
+            pb_time_sec INTEGER,               -- 현재 PB (초), VDOT 훈련 페이스 기준
             target_date TEXT,                  -- nullable, 대회 날짜
             race_name TEXT,                    -- nullable, 대회명
             race_confirmed INTEGER DEFAULT 0,  -- 0/1
@@ -511,32 +512,48 @@ def get_active_goals(user_id: int = 1) -> list[dict]:
 
 
 def upsert_goal(user_id: int, priority: str, event_type: str,
-                target_time_sec: int, target_date: str = None,
-                race_name: str = None, race_confirmed: bool = False,
-                weekly_days_available: int = 4, max_weekly_km: float = 30,
-                injury_notes: str = None) -> int:
+                target_time_sec: int, pb_time_sec: int = None,
+                target_date: str = None, race_name: str = None,
+                race_confirmed: bool = False, weekly_days_available: int = 4,
+                max_weekly_km: float = 30, injury_notes: str = None) -> int:
     """목표 저장 (같은 priority + event_type이면 업데이트)"""
     conn = get_connection()
     cursor = conn.cursor()
+
+    # 기존 DB 마이그레이션 (컬럼/인덱스 없으면 추가)
+    try:
+        cursor.execute("ALTER TABLE goals ADD COLUMN pb_time_sec INTEGER")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_goals_unique
+            ON goals (user_id, priority, event_type, status)
+        """)
+        conn.commit()
+    except Exception:
+        pass
+
     cursor.execute("""
         INSERT INTO goals (
-            user_id, priority, event_type, target_time_sec, target_date,
-            race_name, race_confirmed, weekly_days_available, max_weekly_km,
-            injury_notes, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            user_id, priority, event_type, target_time_sec, pb_time_sec,
+            target_date, race_name, race_confirmed, weekly_days_available,
+            max_weekly_km, injury_notes, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT DO NOTHING
-    """, (user_id, priority, event_type, target_time_sec, target_date,
-          race_name, 1 if race_confirmed else 0,
+    """, (user_id, priority, event_type, target_time_sec, pb_time_sec,
+          target_date, race_name, 1 if race_confirmed else 0,
           weekly_days_available, max_weekly_km, injury_notes))
 
     # 이미 있으면 업데이트
     cursor.execute("""
         UPDATE goals SET
-            target_time_sec = ?, target_date = ?, race_name = ?,
-            race_confirmed = ?, weekly_days_available = ?, max_weekly_km = ?,
-            injury_notes = ?, updated_at = datetime('now')
+            target_time_sec = ?, pb_time_sec = ?, target_date = ?,
+            race_name = ?, race_confirmed = ?, weekly_days_available = ?,
+            max_weekly_km = ?, injury_notes = ?, updated_at = datetime('now')
         WHERE user_id = ? AND priority = ? AND event_type = ? AND status = 'active'
-    """, (target_time_sec, target_date, race_name,
+    """, (target_time_sec, pb_time_sec, target_date, race_name,
           1 if race_confirmed else 0, weekly_days_available, max_weekly_km,
           injury_notes, user_id, priority, event_type))
 

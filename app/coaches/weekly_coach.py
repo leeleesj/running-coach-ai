@@ -115,12 +115,29 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
     max_km = primary_goal["max_weekly_km"] if primary_goal else 30
     injury_notes = primary_goal.get("injury_notes", "") if primary_goal else ""
 
-    # 7. Qwen 프롬프트 생성
+    # 7. VDOT 계산 (primary 목표 기반)
+    vdot_text = ""
+    vdot_value = None
+    if primary_goal:
+        from app.utils.vdot import calc_vdot_from_goal, format_vdot_summary
+        pb_sec = primary_goal.get("pb_time_sec") or primary_goal.get("target_time_sec", 0)
+        vdot_value = calc_vdot_from_goal(
+            primary_goal.get("event_type", ""),
+            pb_sec,
+        )
+        if vdot_value:
+            vdot_text = "\n" + format_vdot_summary(
+                event_type=primary_goal["event_type"],
+                target_time_sec=primary_goal["target_time_sec"],
+                pb_time_sec=primary_goal.get("pb_time_sec"),
+            ) + "\n"
+
+    # 8. Qwen 프롬프트 생성
     prompt = f"""당신은 전문 러닝 코치입니다. 이번 주 7일 훈련 계획을 JSON으로 작성해주세요.
 
 ## 훈련 목표
 {_format_goal_text(goals)}
-
+{vdot_text}
 ## 현재 상태
 - 훈련 단계: {phase_kr}
 - ACWR: {acwr_data['acwr']} (최근 7일 {acwr_data['acute_km']}km / 4주 주간평균 {acwr_data['chronic_weekly_km']}km)
@@ -198,10 +215,12 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
         print(f"주간 계획 JSON 파싱 실패: {e}\n{raw[:300]}")
         return None
 
-    # 날짜 정보 추가
+    # 날짜 정보 + VDOT 추가
     plan["week_start"] = week_start
     plan["dates"] = {key: (monday + timedelta(days=i)).strftime("%Y-%m-%d")
                      for i, key in enumerate(DAY_KEY)}
+    if vdot_value:
+        plan["vdot"] = vdot_value
 
     # DB 저장
     save_weekly_plan(

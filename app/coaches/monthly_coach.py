@@ -110,6 +110,20 @@ async def generate_monthly_report(user_id: int = 1, year_month: str = None) -> d
             days_left = (target - datetime.now()).days
             goal_text += f" (D-{days_left})"
 
+    # VDOT 계산
+    from app.utils.vdot import calc_vdot_from_goal, format_vdot_summary, predict_all_races
+    vdot_value = None
+    vdot_text = ""
+    if primary_goal:
+        pb_sec = primary_goal.get("pb_time_sec") or primary_goal.get("target_time_sec", 0)
+        vdot_value = calc_vdot_from_goal(primary_goal.get("event_type", ""), pb_sec)
+        if vdot_value:
+            vdot_text = "\n" + format_vdot_summary(
+                event_type=primary_goal["event_type"],
+                target_time_sec=primary_goal["target_time_sec"],
+                pb_time_sec=primary_goal.get("pb_time_sec"),
+            ) + "\n"
+
     # Qwen 분석 프롬프트
     pace_str = f"{int(avg_pace_sec // 60)}:{int(avg_pace_sec % 60):02d}/km" if avg_pace_sec > 0 else "N/A"
     activities_summary = "\n".join(
@@ -131,7 +145,7 @@ async def generate_monthly_report(user_id: int = 1, year_month: str = None) -> d
 
 ## 목표
 {goal_text}
-
+{vdot_text}
 ## 개인 심박존
 존2: {zones['zone1_max']+1}~{zones['zone2_max']}bpm
 존3: {zones['zone2_max']+1}~{zones['zone3_max']}bpm
@@ -182,6 +196,7 @@ async def generate_monthly_report(user_id: int = 1, year_month: str = None) -> d
         "adherence_rate": adherence,
         "zone_distribution": zone_dist,
         "goal_text": goal_text,
+        "vdot": vdot_value,
         **analysis,
     }
 
@@ -196,10 +211,13 @@ def format_monthly_report_message(report: dict) -> str:
     zone_dist = report.get("zone_distribution", {})
     zone_str = " | ".join(f"{k} {v}%" for k, v in zone_dist.items() if v > 0)
 
+    vdot = report.get("vdot")
+    vdot_str = f" | VDOT {vdot}" if vdot else ""
+
     return "\n".join([
         f"📊 {year}년 {month}월 훈련 리포트",
         "",
-        f"🏃 총 {report['total_sessions']}회 | {report['total_km']}km | 이행도 {report['adherence_rate']}%",
+        f"🏃 총 {report['total_sessions']}회 | {report['total_km']}km | 이행도 {report['adherence_rate']}%{vdot_str}",
         f"💓 존 분포: {zone_str}",
         "",
         f"📝 {report.get('fitness_assessment', '')}",
