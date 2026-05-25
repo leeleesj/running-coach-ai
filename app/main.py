@@ -7,6 +7,9 @@ from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 
 import app.config as config
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 from app.ai.local_llm import analyze_activity, parse_llm_response
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
@@ -96,12 +99,12 @@ async def receive_strava_event(request: Request, background_tasks: BackgroundTas
     activity_id = data.get("object_id")
     athlete_id = data.get("owner_id")
 
-    print(f"Webhook 수신: {object_type} {aspect_type} id={activity_id}")
+    logger.info(f"Webhook 수신: {object_type} {aspect_type} id={activity_id}")
 
     if object_type == "activity" and aspect_type in ("create", "update"):
         # 현재 처리 중인 activity면 스킵
         if activity_id in processing_ids:
-            print(f"이미 처리 중, 스킵: {activity_id}")
+            logger.info(f"이미 처리 중, 스킵: {activity_id}")
             return {"status": "EVENT_RECEIVED"}
 
         # 백그라운드로 처리 (즉시 200 반환)
@@ -123,19 +126,19 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
     try:
         # create 이벤트 중복 방지
         if aspect_type == "create" and is_already_processed(activity_id):
-            print(f"이미 처리된 활동, 스킵: {activity_id}")
+            logger.info(f"이미 처리된 활동, 스킵: {activity_id}")
             return
 
-        print(f"새 운동 처리 시작! ID: {activity_id}")
+        logger.info(f"새 운동 처리 시작! ID: {activity_id}")
 
         # 1. Strava 데이터 가져오기
         # create 직후엔 Strava가 GPS 처리 중 → splits_metric 비어있을 수 있음
         if aspect_type == "create":
-            print("create 이벤트: 30초 대기 (Strava GPS 처리 완료 후 fetch)")
+            logger.info("create 이벤트: 30초 대기 (Strava GPS 처리 완료 후 fetch)")
             await asyncio.sleep(30)
         raw = await get_activity(activity_id, athlete_id)
         if not raw:
-            print(f"운동 데이터 가져오기 실패: {activity_id}")
+            logger.warning(f"운동 데이터 가져오기 실패: {activity_id}")
             await send_message(f"⚠️ 운동 데이터를 가져오지 못했어요. (ID: {activity_id})")
             return
 
@@ -150,7 +153,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             else:
                 weather = await get_weather()
         except Exception as e:
-            print(f"날씨 API 실패 (계속 진행): {e}")
+            logger.warning(f"날씨 API 실패 (계속 진행): {e}")
 
         # 3. 심박 보정 (날씨 없으면 스킵)
         hr_correction = {}
@@ -163,16 +166,16 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                     activity.avg_heartrate_adjusted = adjusted_hr
                     activity.hr_correction = hr_correction["correction"]
                     activity.hr_correction_comment = hr_correction["comment"]
-                    print(f"심박 보정: {activity.avg_heartrate}bpm → {adjusted_hr}bpm ({hr_correction['comment']})")
+                    logger.info(f"심박 보정: {activity.avg_heartrate}bpm → {adjusted_hr}bpm ({hr_correction['comment']})")
         except Exception as e:
-            print(f"심박 보정 실패 (계속 진행): {e}")
+            logger.warning(f"심박 보정 실패 (계속 진행): {e}")
 
         # 4. 이번 주 활동 가져오기
         weekly = []
         try:
             weekly = await get_weekly_activities(athlete_id)
         except Exception as e:
-            print(f"주간 활동 가져오기 실패 (계속 진행): {e}")
+            logger.warning(f"주간 활동 가져오기 실패 (계속 진행): {e}")
 
         # 5. DB 저장
         activity_db_id = 0
@@ -180,7 +183,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             activity_db_id = save_activity(activity)
             save_splits(activity_db_id, activity.splits)
         except Exception as e:
-            print(f"DB 저장 실패 (계속 진행): {e}")
+            logger.error(f"DB 저장 실패 (계속 진행): {e}")
             await send_message(f"⚠️ DB 저장 실패: {str(e)}")
 
         # 5-1. Personal RAG 인덱스 업데이트 + 비교 데이터 수집
@@ -202,9 +205,9 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                 }
                 rag_comparison = rag.get_comparison_data(activity_dict)
                 rag.upsert_activity(activity_dict)
-                print(f"Personal RAG 인덱스 업데이트 완료 (유사 운동 {len(rag_comparison)}개)")
+                logger.info(f"Personal RAG 인덱스 업데이트 완료 (유사 운동 {len(rag_comparison)}개)")
         except Exception as e:
-            print(f"Personal RAG 업데이트 실패 (무시하고 계속): {e}")
+            logger.warning(f"Personal RAG 업데이트 실패 (무시하고 계속): {e}")
 
         # 5-2. 오늘 계획 세션 + 내일 계획 세션 조회 (주간 계획 DB)
         planned_session = None
@@ -218,16 +221,16 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                 weekly_plan = json.loads(weekly_plan_row["plan_json"])
                 planned_session = get_today_planned_session(weekly_plan)
                 tomorrow_session = get_tomorrow_planned_session(weekly_plan)
-                print(f"주간 계획 조회 완료: 오늘={planned_session and planned_session.get('type')}, 내일={tomorrow_session and tomorrow_session.get('type')}")
+                logger.info(f"주간 계획 조회 완료: 오늘={planned_session and planned_session.get('type')}, 내일={tomorrow_session and tomorrow_session.get('type')}")
         except Exception as e:
-            print(f"주간 계획 조회 실패 (무시하고 계속): {e}")
+            logger.warning(f"주간 계획 조회 실패 (무시하고 계속): {e}")
 
         # 6. 첫 번째 메시지: 운동 요약 즉시 전송
         try:
             summary_message = format_activity_message(activity, weather)
             await send_message(summary_message)
         except Exception as e:
-            print(f"운동 요약 전송 실패: {e}")
+            logger.error(f"운동 요약 전송 실패: {e}")
 
         # 7. LLM 분석
         analysis_text = ""
@@ -240,7 +243,7 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
             )
             analysis_dict = parse_llm_response(analysis_text)
         except Exception as e:
-            print(f"LLM 분석 실패: {e}")
+            logger.error(f"LLM 분석 실패: {e}")
 
         # 7-1. Notion 훈련 일지 기록 (분석 완료 후)
         ai_comment = ""
@@ -252,16 +255,21 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                 activity={
                     "date": activity.date,
                     "name": activity.name,
+                    "strava_id": activity.id,
                     "distance_km": activity.distance_km,
                     "avg_heartrate": activity.avg_heartrate,
+                    "max_heartrate": activity.max_heartrate,
                     "avg_pace_sec": activity.avg_pace_sec,
+                    "avg_cadence": activity.avg_cadence,
+                    "elevation_gain": activity.elevation_gain,
+                    "calories": activity.calories,
                     "training_type": activity.training_type,
                 },
                 planned_session=planned_session,
                 ai_comment=ai_comment,
             )
         except Exception as e:
-            print(f"Notion 훈련 일지 기록 실패 (무시하고 계속): {e}")
+            logger.warning(f"Notion 훈련 일지 기록 실패 (무시하고 계속): {e}")
 
         # 8. 두 번째 메시지: AI 분석 전송
         try:
@@ -274,27 +282,27 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                 )
             else:
                 # JSON 파싱 실패 시 텍스트 그대로
-                print("JSON 파싱 실패, 텍스트로 전송")
+                logger.warning("JSON 파싱 실패, 텍스트로 전송")
                 analysis_message = f"🤖 <b>AI 코치 분석</b>\n{analysis_text}"
             await send_message(analysis_message)
         except Exception as e:
-            print(f"AI 분석 전송 실패: {e}")
+            logger.error(f"AI 분석 전송 실패: {e}")
             traceback.print_exc()
 
         # 터미널 출력
-        print(f"=== 운동 분석 완료 ===")
-        print(f"날짜: {activity.date}")
-        print(f"거리: {activity.distance_km} km")
-        print(f"페이스: {activity.pace}")
-        print(f"심박: {activity.avg_heartrate} bpm")
+        logger.info("=== 운동 분석 완료 ===")
+        logger.info(f"날짜: {activity.date}")
+        logger.info(f"거리: {activity.distance_km} km")
+        logger.info(f"페이스: {activity.pace}")
+        logger.info(f"심박: {activity.avg_heartrate} bpm")
         if activity.pr_rank == 1:
-            print(f"🏆 역대 최고 페이스!")
+            logger.info("역대 최고 페이스!")
         elif activity.pr_rank:
-            print(f"기록 순위: {activity.pr_rank}위")
-        print(f"====================")
+            logger.info(f"기록 순위: {activity.pr_rank}위")
+        logger.info("====================")
 
     except Exception as e:
-        print(f"예상치 못한 에러: {activity_id}, {e}")
+        logger.error(f"예상치 못한 에러: {activity_id}, {e}")
         try:
             await send_message(f"⚠️ 예상치 못한 오류가 발생했어요.\n{str(e)}")
         except:

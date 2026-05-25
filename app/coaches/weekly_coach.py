@@ -14,6 +14,7 @@ import json
 import httpx
 from datetime import datetime, timedelta
 
+from app.core.logger import get_logger
 from app.models.database import (
     get_active_goals, get_training_zones, calculate_acwr,
     save_weekly_plan, get_weekly_plan_by_date, get_current_weekly_plan,
@@ -99,7 +100,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
     # 이미 이번 주 계획이 있으면 스킵
     existing = get_weekly_plan_by_date(week_start)
     if existing and existing.get("plan_json"):
-        print(f"이번 주 계획 이미 존재: {week_start}")
+        logger.info(f"이번 주 계획 이미 존재: {week_start}")
         return json.loads(existing["plan_json"])
 
     # 4. 훈련 단계 판단
@@ -118,14 +119,16 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
     # 7. VDOT 계산 (primary 목표 기반)
     vdot_text = ""
     vdot_value = None
+    paces = {}
     if primary_goal:
-        from app.utils.vdot import calc_vdot_from_goal, format_vdot_summary
+        from app.utils.vdot import calc_vdot_from_goal, format_vdot_summary, get_training_paces, _fmt_pace
         pb_sec = primary_goal.get("pb_time_sec") or primary_goal.get("target_time_sec", 0)
         vdot_value = calc_vdot_from_goal(
             primary_goal.get("event_type", ""),
             pb_sec,
         )
         if vdot_value:
+            paces = get_training_paces(vdot_value)
             vdot_text = "\n" + format_vdot_summary(
                 event_type=primary_goal["event_type"],
                 target_time_sec=primary_goal["target_time_sec"],
@@ -133,15 +136,26 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
             ) + "\n"
 
     # 8. Qwen 프롬프트 생성
-    prompt = f"""당신은 전문 러닝 코치입니다. 이번 주 7일 훈련 계획을 JSON으로 작성해주세요.
+    # 부상 시 강제 제약 텍스트
+    injury_block = ""
+    if injury_notes:
+        injury_block = f"""
+⛔ 부상 주의 (최우선 적용)
+- 부상 상태: {injury_notes}
+- 위 부상 메모를 반드시 최우선으로 반영할 것
+- 부상 부위에 부담을 주는 훈련종류(인터벌/템포런/LSD)는 절대 포함 금지
+- 허용 훈련종류: 존2 조깅 / 회복 조깅 / 휴식 만 사용
+- total_planned_km는 반드시 {max_km}km 이하로 제한
+"""
 
+    prompt = f"""당신은 전문 러닝 코치입니다. 이번 주 7일 훈련 계획을 JSON으로 작성해주세요.
+{injury_block}
 ## 훈련 목표
 {_format_goal_text(goals)}
 {vdot_text}
 ## 현재 상태
 - 훈련 단계: {phase_kr}
 - ACWR: {acwr_data['acwr']} (최근 7일 {acwr_data['acute_km']}km / 4주 주간평균 {acwr_data['chronic_weekly_km']}km)
-- 부상 메모: {injury_notes or '없음'}
 
 ## 개인 심박존
 존1: ~{zones['zone1_max']}bpm
@@ -151,14 +165,14 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
 
 ## 훈련 제약
 - 주당 훈련 가능 일수: {available_days}일
-- 주당 최대 거리: {max_km}km
+- 주당 최대 거리: {max_km}km (반드시 준수)
 - ACWR 안전 범위: 0.8~1.3 (현재 {acwr_data['acwr']} → {acwr_data['risk']})
-{"⚠️ ACWR이 1.3 초과: 부상 위험 높음. 이번 주 total_planned_km는 반드시 최근 7일(" + str(acwr_data['acute_km']) + "km) 이하로 제한할 것." if acwr_data['acwr'] > 1.3 else ""}
+{"⚠️ ACWR이 1.3 초과: 부상 위험 높음. total_planned_km는 반드시 최근 7일(" + str(acwr_data['acute_km']) + "km) 이하." if acwr_data['acwr'] > 1.3 else ""}
 
 ## 이번 주 날짜
 월({dates[0]}), 화({dates[1]}), 수({dates[2]}), 목({dates[3]}), 금({dates[4]}), 토({dates[5]}), 일({dates[6]})
 
-## 훈련 단계별 지침
+## 훈련 단계별 지침 (부상 없을 때만 적용)
 - 베이스: 존2 비율 70%+, LSD 포함, 강도 낮게
 - 빌드: 템포런/인터벌 추가, 주간 거리 점진 증가
 - 피크: 최고 강도+거리, 레이스페이스 포함
@@ -186,7 +200,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
 휴식인 경우 distance_km=0, pace="-", heartrate="-"
 """
 
-    print(f"주간 계획 생성 중... (단계: {phase_kr}, ACWR: {acwr_data['acwr']})")
+    logger.info(f"주간 계획 생성 중... (단계: {phase_kr}, ACWR: {acwr_data['acwr']})")
 
     async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(
@@ -200,7 +214,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
         )
 
     if resp.status_code != 200:
-        print(f"Ollama 에러: {resp.status_code}")
+        logger.error(f"Ollama 에러: {resp.status_code}")
         return None
 
     raw = resp.json().get("response", "")
@@ -212,7 +226,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
     try:
         plan = json.loads(raw.strip())
     except Exception as e:
-        print(f"주간 계획 JSON 파싱 실패: {e}\n{raw[:300]}")
+        logger.error(f"주간 계획 JSON 파싱 실패: {e}\n{raw[:300]}")
         return None
 
     # 날짜 정보 + VDOT 추가
@@ -221,6 +235,25 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
                      for i, key in enumerate(DAY_KEY)}
     if vdot_value:
         plan["vdot"] = vdot_value
+
+    # 부상 시 강제 후처리 (LLM 무시 방지)
+    if injury_notes:
+        FORBIDDEN = {"인터벌", "템포런", "LSD"}
+        easy_pace = (
+            f"{_fmt_pace(paces['E']['pace_sec_fast'])}~{_fmt_pace(paces['E']['pace_sec_slow'])}"
+            if paces.get("E")
+            else "7:00~8:30/km"
+        )
+        for key, session in plan.get("sessions", {}).items():
+            if session.get("type") in FORBIDDEN:
+                session["type"] = "존2 조깅"
+                session["pace"] = easy_pace
+                session["heartrate"] = f"{zones['zone1_max']+1}~{zones['zone2_max']}bpm"
+                session["notes"] = f"[부상 조정] {session.get('notes', '')}"
+        # total_planned_km 상한 강제
+        total = sum(s.get("distance_km", 0) for s in plan.get("sessions", {}).values())
+        plan["total_planned_km"] = min(round(total, 1), max_km)
+        logger.info(f"부상 후처리 완료: {plan['total_planned_km']}km (상한 {max_km}km)")
 
     # DB 저장
     save_weekly_plan(
@@ -232,7 +265,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
         acwr=acwr_data["acwr"],
     )
 
-    print(f"주간 계획 생성 완료: {week_start} ({phase_kr}, {plan.get('total_planned_km')}km)")
+    logger.info(f"주간 계획 생성 완료: {week_start} ({phase_kr}, {plan.get('total_planned_km')}km)")
     return plan
 
 
