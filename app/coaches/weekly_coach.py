@@ -15,6 +15,8 @@ import httpx
 from datetime import datetime, timedelta
 
 from app.core.logger import get_logger
+logger = get_logger(__name__)
+
 from app.models.database import (
     get_active_goals, get_training_zones, calculate_acwr,
     save_weekly_plan, get_weekly_plan_by_date, get_current_weekly_plan,
@@ -250,10 +252,13 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
                 session["pace"] = easy_pace
                 session["heartrate"] = f"{zones['zone1_max']+1}~{zones['zone2_max']}bpm"
                 session["notes"] = f"[부상 조정] {session.get('notes', '')}"
-        # total_planned_km 상한 강제
-        total = sum(s.get("distance_km", 0) for s in plan.get("sessions", {}).values())
-        plan["total_planned_km"] = min(round(total, 1), max_km)
-        logger.info(f"부상 후처리 완료: {plan['total_planned_km']}km (상한 {max_km}km)")
+        logger.info("부상 후처리 완료: 인터벌/템포런/LSD → 존2 조깅 치환")
+
+    # max_km 상한 항상 강제 (부상 여부 무관)
+    total = sum(s.get("distance_km", 0) for s in plan.get("sessions", {}).values())
+    plan["total_planned_km"] = min(round(total, 1), max_km)
+    if total > max_km:
+        logger.info(f"총 거리 상한 클리핑: {round(total,1)}km → {plan['total_planned_km']}km")
 
     # DB 저장
     save_weekly_plan(
