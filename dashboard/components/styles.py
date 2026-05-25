@@ -131,13 +131,13 @@ def inject_css():
 def stat_card(value: str, label: str, sub: str = "", sub_color: str = "") -> str:
     sub_class = f"class='kr-stat-sub {sub_color}'" if sub_color else "class='kr-stat-sub'"
     sub_html = f"<div {sub_class}>{sub}</div>" if sub else ""
-    return f"""
-    <div class="kr-stat-card">
-        <div class="kr-stat-value">{value}</div>
-        <div class="kr-stat-label">{label}</div>
-        {sub_html}
-    </div>
-    """
+    return (
+        f'<div class="kr-stat-card">'
+        f'<div class="kr-stat-value">{value}</div>'
+        f'<div class="kr-stat-label">{label}</div>'
+        f'{sub_html}'
+        f'</div>'
+    )
 
 
 def badge(text: str, color: str = "gray") -> str:

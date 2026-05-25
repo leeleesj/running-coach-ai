@@ -1,4 +1,4 @@
-"""Page 1 — 홈"""
+"""Page — 홈"""
 
 import streamlit as st
 import json
@@ -15,7 +15,6 @@ from dashboard.components.charts import (
     score_gauge_chart, weekly_km_bar_chart,
 )
 
-st.set_page_config(page_title="홈 — Running Coach", page_icon="🏠", layout="wide")
 inject_css()
 
 # ── 데이터 로드 ──────────────────────────────────────────────────────────────
@@ -110,7 +109,7 @@ with left_col:
 
         st.plotly_chart(
             weekly_plan_vs_actual_chart(plan, actual_by_day, dates),
-            use_container_width=True,
+            width="stretch",
         )
 
         # 요일별 상태 요약
@@ -145,7 +144,7 @@ with left_col:
 with right_col:
     st.markdown('<div class="kr-section-title">📊 주간 마일리지</div>', unsafe_allow_html=True)
     if week_labels:
-        st.plotly_chart(weekly_km_bar_chart(week_labels, week_km), use_container_width=True)
+        st.plotly_chart(weekly_km_bar_chart(week_labels, week_km), width="stretch")
     else:
         st.info("데이터 없음")
 
@@ -155,13 +154,13 @@ latest_score = score_hist[-1] if score_hist else None
 g1, g2, g3 = st.columns(3)
 with g1:
     v = latest_score["fitness_score"] if latest_score else 0
-    st.plotly_chart(score_gauge_chart(v, "체력 지수 (CTL)"), use_container_width=True)
+    st.plotly_chart(score_gauge_chart(v, "체력 지수 (CTL)"), width="stretch")
 with g2:
     v = latest_score["efficiency_score"] if latest_score else 0
-    st.plotly_chart(score_gauge_chart(v, "효율 지수 (심박)"), use_container_width=True)
+    st.plotly_chart(score_gauge_chart(v, "효율 지수 (심박)"), width="stretch")
 with g3:
     v = latest_score["compliance_score"] if latest_score else int(compliance)
-    st.plotly_chart(score_gauge_chart(v, "이행 지수"), use_container_width=True)
+    st.plotly_chart(score_gauge_chart(v, "이행 지수"), width="stretch")
 
 # ── VDOT 훈련 페이스 참고 ────────────────────────────────────────────────────
 paces = vdot_info.get("paces", {})
@@ -170,16 +169,16 @@ if paces:
     st.markdown('<div class="kr-section-title">📐 훈련 페이스 처방</div>', unsafe_allow_html=True)
     p1, p2 = st.columns(2)
     with p1:
-        st.markdown(card(f"""
-        <div class="kr-sub">현재 PB 기준 페이스 (VDOT {vdot_info.get('vdot_pb')})</div><br>
-        <b>존2 조깅 (E)</b>: {paces.get('E', {}).get('pace_range', '-')}<br>
-        <b>템포런 (T)</b>: {paces.get('T', {}).get('pace_range', '-')}<br>
-        <b>인터벌 (I)</b>: {paces.get('I', {}).get('pace_range', '-')}
-        """), unsafe_allow_html=True)
+        st.markdown(card(
+            f"<div class='kr-sub'>현재 PB 기준 페이스 (VDOT {vdot_info.get('vdot_pb')})</div><br>"
+            f"<b>존2 조깅 (E)</b>: {paces.get('E', {}).get('pace_range', '-')}<br>"
+            f"<b>템포런 (T)</b>: {paces.get('T', {}).get('pace_range', '-')}<br>"
+            f"<b>인터벌 (I)</b>: {paces.get('I', {}).get('pace_range', '-')}"
+        ), unsafe_allow_html=True)
     with p2:
-        st.markdown(card(f"""
-        <div class="kr-sub">현재 기준 예상 기록</div><br>
-        <b>5km</b>: {preds.get('5km', '-')}<br>
-        <b>10km</b>: {preds.get('10km', '-')}<br>
-        <b>하프</b>: {preds.get('half', '-')}
-        """), unsafe_allow_html=True)
+        st.markdown(card(
+            f"<div class='kr-sub'>현재 기준 예상 기록</div><br>"
+            f"<b>5km</b>: {preds.get('5km', '-')}<br>"
+            f"<b>10km</b>: {preds.get('10km', '-')}<br>"
+            f"<b>하프</b>: {preds.get('half', '-')}"
+        ), unsafe_allow_html=True)

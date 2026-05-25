@@ -13,4 +13,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.switch_page("pages/home.py")
+pages = [
+    st.Page("pages/home.py",    title="홈",         icon="🏠", default=True),
+    st.Page("pages/weekly.py",  title="이번 주",     icon="📋"),
+    st.Page("pages/monthly.py", title="월간 트래킹", icon="📈"),
+    st.Page("pages/settings.py",title="설정",        icon="⚙️"),
+]
+
+pg = st.navigation(pages)
+pg.run()

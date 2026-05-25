@@ -119,21 +119,19 @@ def get_week_compliance(week_start: str, user_id: int = 1) -> float:
 # ── 월간 데이터 ───────────────────────────────────────────────────────────────
 
 def get_available_months(user_id: int = 1) -> list[str]:
-    """monthly_reports에 있는 월 목록 (최신순)"""
+    """월 목록 반환 (최신순). 현재 달은 데이터 없어도 항상 포함."""
+    from datetime import datetime
+    current_month = datetime.now().strftime("%Y-%m")
+
     conn = get_connection()
     cursor = conn.cursor()
+
     cursor.execute("""
         SELECT year_month FROM monthly_reports
         WHERE user_id = ? ORDER BY year_month DESC
     """, (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
+    report_months = [r["year_month"] for r in cursor.fetchall()]
 
-    months = [r["year_month"] for r in rows]
-
-    # activities 기준으로도 보완
-    conn = get_connection()
-    cursor = conn.cursor()
     cursor.execute("""
         SELECT DISTINCT strftime('%Y-%m', date) as ym
         FROM activities WHERE user_id = ?
@@ -142,7 +140,7 @@ def get_available_months(user_id: int = 1) -> list[str]:
     act_months = [r["ym"] for r in cursor.fetchall()]
     conn.close()
 
-    all_months = list(dict.fromkeys(months + act_months))  # 순서 유지 중복 제거
+    all_months = list(dict.fromkeys([current_month] + report_months + act_months))
     return all_months
 
 
@@ -248,43 +246,56 @@ def get_recent_activities_trend(user_id: int = 1, n: int = 15) -> list[dict]:
     return list(reversed(rows))
 
 
-def save_score_snapshot(user_id: int = 1) -> dict:
+def save_score_snapshot(user_id: int = 1, reference_date: str | None = None) -> dict:
     """
-    이번 주 score_history 스냅샷 계산 & 저장
-    매주 월요일 스케줄러에서 호출
+    score_history 스냅샷 계산 & 저장.
+    reference_date: 기준 날짜 (YYYY-MM-DD). None이면 오늘 기준 이번 주 월요일.
+    백필 시에는 과거 날짜를 넘겨서 해당 시점 기준으로 계산.
     """
     from app.utils.vdot import calc_vdot_from_goal
 
-    week_start, _ = get_current_week_range()
+    if reference_date:
+        from datetime import date
+        ref = date.fromisoformat(reference_date)
+        # reference_date가 속한 주 월요일
+        days_since_monday = ref.weekday()
+        monday = ref - __import__('datetime').timedelta(days=days_since_monday)
+        week_start = monday.isoformat()
+    else:
+        week_start, _ = get_current_week_range()
+        reference_date = week_start
+
     vdot_info = get_vdot_info(user_id)
     vdot = vdot_info.get("vdot_pb")
 
-    # 체력 지수: 최근 42일 주간 평균 km → 정규화
     conn = get_connection()
     cursor = conn.cursor()
+
+    # 체력 지수: reference_date 기준 이전 42일 주간 평균 km
     cursor.execute("""
         SELECT COALESCE(SUM(distance_km), 0) as total
-        FROM activities WHERE user_id = ? AND date >= date('now', '-42 days')
-    """, (user_id,))
+        FROM activities
+        WHERE user_id = ? AND date < ? AND date >= date(?, '-42 days')
+    """, (user_id, reference_date, reference_date))
     total_42 = cursor.fetchone()["total"]
-    weekly_avg = total_42 / 6  # 42일 = 6주
+    weekly_avg = total_42 / 6
     fitness = min(100, int(weekly_avg * 2.5))
 
-    # 효율 지수: 페이스 400~500초/km 구간 평균 심박
+    # 효율 지수: 같은 기간 6:40~8:20/km 구간 평균 심박
     cursor.execute("""
         SELECT AVG(avg_heartrate) as avg_hr
         FROM activities
         WHERE user_id = ? AND avg_pace_sec BETWEEN 400 AND 500
-        AND date >= date('now', '-42 days') AND avg_heartrate > 0
-    """, (user_id,))
+        AND date < ? AND date >= date(?, '-42 days')
+        AND avg_heartrate > 0
+    """, (user_id, reference_date, reference_date))
     hr_row = cursor.fetchone()
     avg_hr = hr_row["avg_hr"] if hr_row["avg_hr"] else 160
     efficiency = max(0, min(100, int(210 - avg_hr)))
 
-    # 이행 지수: 이번 주 실제 km / 계획 km
+    # 이행 지수: 해당 주 실제 km / 계획 km (과거 주는 0)
     compliance = int(get_week_compliance(week_start, user_id))
 
-    # 저장
     cursor.execute("""
         INSERT OR REPLACE INTO score_history
         (user_id, week_start, vdot, fitness_score, efficiency_score, compliance_score)
@@ -300,6 +311,41 @@ def save_score_snapshot(user_id: int = 1) -> dict:
         "efficiency": efficiency,
         "compliance": compliance,
     }
+
+
+def backfill_score_history(user_id: int = 1) -> int:
+    """
+    activities 데이터가 있는 첫 주부터 오늘까지 모든 월요일에 대해
+    score_history 스냅샷을 계산해서 채워넣음.
+    이미 있는 row는 덮어씀 (INSERT OR REPLACE).
+    반환: 처리한 주 수
+    """
+    import datetime
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT MIN(date) FROM activities WHERE user_id = ?
+    """, (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        return 0
+
+    first_date = datetime.date.fromisoformat(row[0][:10])
+    # 첫 활동이 속한 주 월요일
+    first_monday = first_date - datetime.timedelta(days=first_date.weekday())
+    today = datetime.date.today()
+
+    count = 0
+    current = first_monday
+    while current <= today:
+        save_score_snapshot(user_id=user_id, reference_date=current.isoformat())
+        current += datetime.timedelta(weeks=1)
+        count += 1
+
+    return count
 
 
 # ── ACWR ─────────────────────────────────────────────────────────────────────

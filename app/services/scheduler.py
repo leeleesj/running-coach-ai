@@ -22,15 +22,19 @@ async def _run_weekly_coach():
     """매주 월요일 07:00 실행"""
     logger.info("[스케줄러] 주간 코치 시작")
     try:
+        # 1. score_history 스냅샷 먼저 저장
+        from dashboard.db import save_score_snapshot
+        snapshot = save_score_snapshot(user_id=1)
+        logger.info(f"[스케줄러] 스코어 스냅샷 저장: fitness={snapshot['fitness']} efficiency={snapshot['efficiency']}")
+
+        # 2. 주간 계획 생성
         from app.coaches.weekly_coach import generate_weekly_plan, format_weekly_plan_message
         from app.services.notion import post_weekly_plan
         from app.services.telegram import send_message
 
         plan = await generate_weekly_plan(user_id=1)
         if plan:
-            # Notion 기록
             await post_weekly_plan(plan)
-            # 텔레그램 발송
             msg = format_weekly_plan_message(plan)
             await send_message(msg)
             logger.info("[스케줄러] 주간 코치 완료")
