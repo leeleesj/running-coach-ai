@@ -10,13 +10,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 KST = pytz.timezone("Asia/Seoul")
 scheduler = AsyncIOScheduler(timezone=KST)
 
 
 async def _run_weekly_coach():
     """매주 월요일 07:00 실행"""
-    print("[스케줄러] 주간 코치 시작")
+    logger.info("[스케줄러] 주간 코치 시작")
     try:
         from app.coaches.weekly_coach import generate_weekly_plan, format_weekly_plan_message
         from app.services.notion import post_weekly_plan
@@ -29,18 +33,18 @@ async def _run_weekly_coach():
             # 텔레그램 발송
             msg = format_weekly_plan_message(plan)
             await send_message(msg)
-            print("[스케줄러] 주간 코치 완료")
+            logger.info("[스케줄러] 주간 코치 완료")
         else:
-            print("[스케줄러] 주간 계획 생성 실패")
+            logger.warning("[스케줄러] 주간 계획 생성 실패")
     except Exception as e:
         import traceback
-        print(f"[스케줄러] 주간 코치 에러: {e}")
+        logger.error(f"[스케줄러] 주간 코치 에러: {e}")
         traceback.print_exc()
 
 
 async def _run_monthly_coach():
     """매월 1일 08:00 실행"""
-    print("[스케줄러] 월간 코치 시작")
+    logger.info("[스케줄러] 월간 코치 시작")
     try:
         from app.coaches.monthly_coach import generate_monthly_report, format_monthly_report_message
         from app.services.notion import post_monthly_report
@@ -53,12 +57,12 @@ async def _run_monthly_coach():
             # 텔레그램 발송
             msg = format_monthly_report_message(report)
             await send_message(msg)
-            print("[스케줄러] 월간 코치 완료")
+            logger.info("[스케줄러] 월간 코치 완료")
         else:
-            print("[스케줄러] 월간 리포트 생성 실패")
+            logger.warning("[스케줄러] 월간 리포트 생성 실패")
     except Exception as e:
         import traceback
-        print(f"[스케줄러] 월간 코치 에러: {e}")
+        logger.error(f"[스케줄러] 월간 코치 에러: {e}")
         traceback.print_exc()
 
 
@@ -79,11 +83,11 @@ def start_scheduler():
         replace_existing=True,
     )
     scheduler.start()
-    print("스케줄러 시작: 주간 코치(월 07:00), 월간 코치(1일 08:00)")
+    logger.info("스케줄러 시작: 주간 코치(월 07:00), 월간 코치(1일 08:00)")
 
 
 def stop_scheduler():
     """FastAPI 종료 시 호출"""
     if scheduler.running:
         scheduler.shutdown()
-        print("스케줄러 종료")
+        logger.info("스케줄러 종료")

@@ -3,6 +3,10 @@ import math
 from datetime import datetime, timedelta
 import app.config as config
 
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def get_base_time() -> tuple[str, str]:
     """
@@ -41,7 +45,7 @@ async def get_weather(lat: float = None, lon: float = None) -> dict:
     """
     if lat and lon:
         nx, ny = latlon_to_grid(lat, lon)
-        print(f"위경도 변환: ({lat}, {lon}) → 격자 ({nx}, {ny})")
+        logger.debug(f"위경도 변환: ({lat}, {lon}) → 격자 ({nx}, {ny})")
     else:
         nx = config.WEATHER_NX
         ny = config.WEATHER_NY
@@ -66,7 +70,7 @@ async def get_weather(lat: float = None, lon: float = None) -> dict:
         )
 
     if response.status_code != 200:
-        print(f"날씨 API 에러: {response.status_code}")
+        logger.error(f"날씨 API 에러: {response.status_code}")
         return {}
 
     data = response.json()

@@ -8,6 +8,10 @@ Notion 쓰기 서비스 (P1-06)
 """
 
 import httpx
+
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 import json
 from datetime import datetime
 
@@ -45,8 +49,13 @@ async def post_training_log(
     date_str = activity.get("date", "")[:10]
     distance_km = activity.get("distance_km", 0)
     avg_hr = activity.get("avg_heartrate", 0)
+    max_hr = activity.get("max_heartrate", 0)
     pace_sec = activity.get("avg_pace_sec", 0)
     pace_str = f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}/km" if pace_sec else "N/A"
+    cadence = activity.get("avg_cadence", 0)
+    elevation = activity.get("elevation_gain", 0)
+    calories = activity.get("calories", 0)
+    strava_id = activity.get("strava_id")
 
     # 계획 대비
     if planned_session and planned_session.get("type", "휴식") != "휴식":
@@ -61,17 +70,24 @@ async def post_training_log(
     title = f"{date_str} {activity.get('name', '러닝')}"
 
     props = {
-        "이름": {"title": _rich_text(title)},
-        "날짜": {"date": {"start": date_str}},
-        "실제 종류": {"rich_text": _rich_text(activity.get("training_type", "러닝"))},
-        "실제 거리": {"number": round(distance_km, 2)},
-        "평균 심박": {"number": round(avg_hr, 1) if avg_hr else 0},
-        "평균 페이스": {"rich_text": _rich_text(pace_str)},
-        "계획 종류": {"rich_text": _rich_text(plan_type)},
-        "계획 거리": {"number": plan_km},
-        "이행": {"rich_text": _rich_text(adherence)},
-        "AI 코멘트": {"rich_text": _rich_text(ai_comment[:500])},
+        "이름":          {"title": _rich_text(title)},
+        "날짜":          {"date": {"start": date_str}},
+        "실제 종류":     {"rich_text": _rich_text(activity.get("training_type", "러닝"))},
+        "실제 거리":     {"number": round(distance_km, 2)},
+        "평균 심박":     {"number": round(avg_hr, 1) if avg_hr else 0},
+        "최고 심박":     {"number": round(max_hr, 1) if max_hr else 0},
+        "평균 페이스":   {"rich_text": _rich_text(pace_str)},
+        "페이스(초/km)": {"number": round(pace_sec, 1) if pace_sec else 0},
+        "고도 상승":     {"number": round(elevation, 1) if elevation else 0},
+        "케이던스":      {"number": int(cadence) if cadence else 0},
+        "칼로리":        {"number": int(calories) if calories else 0},
+        "계획 종류":     {"rich_text": _rich_text(plan_type)},
+        "계획 거리":     {"number": plan_km},
+        "이행":          {"rich_text": _rich_text(adherence)},
+        "AI 코멘트":     {"rich_text": _rich_text(ai_comment[:500])},
     }
+    if strava_id:
+        props["Strava ID"] = {"number": int(strava_id)}
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
@@ -81,11 +97,11 @@ async def post_training_log(
         )
 
     if resp.status_code != 200:
-        print(f"Notion 훈련 일지 기록 실패: {resp.status_code} {resp.text[:200]}")
+        logger.error(f"Notion 훈련 일지 기록 실패: {resp.status_code} {resp.text[:200]}")
         return None
 
     page_id = resp.json().get("id")
-    print(f"Notion 훈련 일지 기록 완료: {title}")
+    logger.info(f"Notion 훈련 일지 기록 완료: {title}")
     return page_id
 
 
@@ -141,11 +157,11 @@ async def post_weekly_plan(plan: dict) -> str | None:
         )
 
     if resp.status_code != 200:
-        print(f"Notion 주간 계획 기록 실패: {resp.status_code} {resp.text[:200]}")
+        logger.error(f"Notion 주간 계획 기록 실패: {resp.status_code} {resp.text[:200]}")
         return None
 
     page_id = resp.json().get("id")
-    print(f"Notion 주간 계획 기록 완료: {week_start}")
+    logger.info(f"Notion 주간 계획 기록 완료: {week_start}")
     return page_id
 
 
@@ -180,9 +196,9 @@ async def post_monthly_report(report: dict) -> str | None:
         )
 
     if resp.status_code != 200:
-        print(f"Notion 월간 리포트 기록 실패: {resp.status_code} {resp.text[:200]}")
+        logger.error(f"Notion 월간 리포트 기록 실패: {resp.status_code} {resp.text[:200]}")
         return None
 
     page_id = resp.json().get("id")
-    print(f"Notion 월간 리포트 기록 완료: {ym}")
+    logger.info(f"Notion 월간 리포트 기록 완료: {ym}")
     return page_id

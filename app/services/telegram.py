@@ -3,6 +3,10 @@ import httpx
 import app.config as config
 from typing import TYPE_CHECKING
 
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from app.models.activity import ActivityData
 
@@ -27,21 +31,21 @@ async def send_message(text: str, retries: int = 3) -> bool:
                 )
 
             if response.status_code != 200:
-                print(f"텔레그램 전송 실패: {response.status_code} {response.text}")
+                logger.error(f"텔레그램 전송 실패: {response.status_code} {response.text}")
                 return False
 
-            print("텔레그램 전송 성공!")
+            logger.info("텔레그램 전송 성공!")
             return True
 
         except httpx.TimeoutException as e:
-            print(f"텔레그램 전송 타임아웃 (시도 {attempt}/{retries}): {e}")
+            logger.warning(f"텔레그램 전송 타임아웃 (시도 {attempt}/{retries}): {e}")
             if attempt < retries:
                 await asyncio.sleep(3)
         except Exception as e:
-            print(f"텔레그램 전송 에러: {e}")
+            logger.error(f"텔레그램 전송 에러: {e}")
             return False
 
-    print("텔레그램 전송 최종 실패 (재시도 소진)")
+    logger.error("텔레그램 전송 최종 실패 (재시도 소진)")
     return False
 
 

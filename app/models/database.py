@@ -3,6 +3,10 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from app.models.activity import ActivityData, SplitData
 
@@ -119,33 +123,6 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS weekly_reports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER REFERENCES users(id),
-            week_start TEXT,
-            week_end TEXT,
-            total_distance REAL,
-            total_count INTEGER,
-            avg_heartrate REAL,
-            analysis_json TEXT,
-            schedule_json TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS meals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER REFERENCES users(id),
-            date TEXT,
-            meal_type TEXT,
-            description TEXT,
-            calories REAL,
-            protein REAL,
-            carbs REAL,
-            fat REAL,
-            photo_url TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
         -- 훈련 목표 (복수 목표 지원)
         CREATE TABLE IF NOT EXISTS goals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +171,18 @@ def init_db():
             notion_page_id TEXT
         );
 
+        -- 주간 점수 히스토리 (대시보드 그래프용)
+        CREATE TABLE IF NOT EXISTS score_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            week_start TEXT UNIQUE,             -- 월요일 날짜 YYYY-MM-DD
+            vdot REAL,
+            fitness_score INTEGER,              -- CTL 기반 0~100
+            efficiency_score INTEGER,           -- 심박 효율 0~100
+            compliance_score INTEGER,           -- 이행률 0~100
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
         -- 신체 정보 히스토리
         CREATE TABLE IF NOT EXISTS profile (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,7 +225,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("DB 초기화 완료!")
+    logger.info("DB 초기화 완료!")
 
 
 def get_training_zones(user_id: int = 1) -> dict:
@@ -299,7 +288,7 @@ def save_activity(parsed: "ActivityData", user_id: int = 1) -> int:
     ActivityData Pydantic 모델을 DB에 저장
     이미 저장된 strava_id면 업데이트, 없으면 새로 삽입 (upsert)
     """
-    print(f"저장할 데이터: id={parsed.id}, name={parsed.name}")
+    logger.debug(f"저장할 데이터: id={parsed.id}, name={parsed.name}")
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -382,7 +371,7 @@ def save_activity(parsed: "ActivityData", user_id: int = 1) -> int:
     activity_db_id = row["id"] if row else 0
     conn.close()
 
-    print(f"DB 저장 완료! db_id={activity_db_id}")
+    logger.info(f"DB 저장 완료! db_id={activity_db_id}")
     return activity_db_id
 
 
@@ -435,7 +424,7 @@ def save_splits(activity_db_id: int, splits: list) -> None:
 
     conn.commit()
     conn.close()
-    print(f"splits 저장 완료! {len(splits)}개 구간")
+    logger.debug(f"splits 저장 완료! {len(splits)}개 구간")
 
 
 def save_user(athlete_id: int, name: str, access_token: str,
@@ -458,7 +447,7 @@ def save_user(athlete_id: int, name: str, access_token: str,
     user_id = cursor.lastrowid
     conn.close()
 
-    print(f"유저 저장 완료! athlete_id={athlete_id}")
+    logger.info(f"유저 저장 완료! athlete_id={athlete_id}")
     return user_id
 
 
@@ -493,7 +482,7 @@ def update_tokens(athlete_id: int, access_token: str,
 
     conn.commit()
     conn.close()
-    print(f"토큰 갱신 완료! expires_at={expires_at}")
+    logger.info(f"토큰 갱신 완료! expires_at={expires_at}")
 
 
 # ── Goals ────────────────────────────────────────────────────────────────────

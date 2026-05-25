@@ -14,6 +14,10 @@ Personal RAG — 내 과거 운동 데이터 벡터 검색
 """
 
 import sqlite3
+
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 from datetime import datetime
 from pathlib import Path
 
@@ -91,7 +95,7 @@ class PersonalRAG:
     def model(self) -> SentenceTransformer:
         """임베딩 모델 지연 로딩"""
         if self._model is None:
-            print(f"임베딩 모델 로딩: {MODEL_NAME}")
+            logger.info(f"임베딩 모델 로딩: {MODEL_NAME}")
             self._model = SentenceTransformer(MODEL_NAME)
         return self._model
 
@@ -156,7 +160,7 @@ class PersonalRAG:
             self.upsert_activity(activity)
             count += 1
 
-        print(f"인덱싱 완료: {count}개 운동 → ChromaDB({COLLECTION_NAME})")
+        logger.info(f"인덱싱 완료: {count}개 운동 → ChromaDB({COLLECTION_NAME})")
         return count
 
     def search_similar(

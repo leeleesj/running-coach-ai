@@ -3,6 +3,10 @@ import json
 import re
 import app.config as config
 from datetime import datetime, timedelta
+
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,7 +25,7 @@ def parse_claude_response(text: str) -> dict | None:
         text = text.strip()
         return json.loads(text)
     except Exception as e:
-        print(f"JSON 파싱 실패: {e}")
+        logger.warning(f"JSON 파싱 실패: {e}")
         return None
 
 
@@ -130,7 +134,7 @@ async def analyze_activity(
         )
 
     if response.status_code != 200:
-        print(f"Claude API 에러: {response.status_code} {response.text}")
+        logger.error(f"Claude API 에러: {response.status_code} {response.text}")
         return ""
 
     result = response.json()
@@ -226,7 +230,7 @@ async def generate_weekly_schedule(
         )
 
     if response.status_code != 200:
-        print(f"Claude API 에러: {response.status_code} {response.text}")
+        logger.error(f"Claude API 에러: {response.status_code} {response.text}")
         return "스케줄 생성에 실패했어요."
 
     result = response.json()

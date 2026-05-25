@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from app.core.logger import get_logger
 from app.models.database import get_training_zones, get_zone_for_heartrate
 
 if TYPE_CHECKING:
@@ -26,7 +27,7 @@ def parse_llm_response(text: str) -> dict | None:
         text = text.strip()
         return json.loads(text)
     except Exception as e:
-        print(f"JSON 파싱 실패: {e}")
+        logger.warning(f"JSON 파싱 실패: {e}")
         return None
 
 
@@ -51,7 +52,7 @@ async def call_ollama(prompt: str, max_tokens: int = 1000) -> str:
         )
 
     if response.status_code != 200:
-        print(f"Ollama API 에러: {response.status_code} {response.text}")
+        logger.error(f"Ollama API 에러: {response.status_code} {response.text}")
         return ""
 
     result = response.json()
@@ -138,9 +139,9 @@ async def analyze_activity(
         if rag.collection.count() > 0:
             rag_context = rag.get_rag_context(activity_dict, exclude_db_id=activity_db_id)
             if rag_context:
-                print("Personal RAG 컨텍스트 주입 완료")
+                logger.debug("Personal RAG 컨텍스트 주입 완료")
     except Exception as e:
-        print(f"Personal RAG 조회 실패 (무시하고 계속): {e}")
+        logger.warning(f"Personal RAG 조회 실패 (무시하고 계속): {e}")
 
     # Knowledge RAG: 러닝 전문 지식 컨텍스트
     knowledge_context = ""
@@ -153,9 +154,9 @@ async def analyze_activity(
                 avg_heartrate=activity.avg_heartrate,
             )
             if knowledge_context:
-                print("Knowledge RAG 컨텍스트 주입 완료")
+                logger.debug("Knowledge RAG 컨텍스트 주입 완료")
     except Exception as e:
-        print(f"Knowledge RAG 조회 실패 (무시하고 계속): {e}")
+        logger.warning(f"Knowledge RAG 조회 실패 (무시하고 계속): {e}")
 
     # 개인 훈련존 가져오기
     zones = get_training_zones()
@@ -253,9 +254,9 @@ async def analyze_activity(
   "progress": "과거 유사 운동과 비교한 오늘의 변화 (위 [과거 유사 운동 데이터]의 수치를 직접 인용할 것. 데이터 없으면 null)"
 }}"""
 
-    print(f"Ollama 분석 시작... (모델: {OLLAMA_MODEL})")
+    logger.info(f"Ollama 분석 시작... (모델: {OLLAMA_MODEL})")
     text = await call_ollama(prompt, max_tokens=1000)
-    print(f"Ollama 분석 완료!")
+    logger.info("Ollama 분석 완료!")
     return text
 
 
@@ -338,7 +339,7 @@ async def generate_weekly_schedule(
 - 주말에 LSD 배치
 - 총 주간 거리 이번 주 대비 10% 이내 증가"""
 
-    print(f"Ollama 스케줄 생성 시작...")
+    logger.info("Ollama 스케줄 생성 시작...")
     text = await call_ollama(prompt, max_tokens=800)
-    print(f"Ollama 스케줄 생성 완료!")
+    logger.info("Ollama 스케줄 생성 완료!")
     return text

@@ -16,6 +16,10 @@ Knowledge RAG — 러닝 전문 지식 벡터 검색
 """
 
 import re
+
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -100,7 +104,7 @@ def extract_text_from_pdf(path: Path) -> str:
         doc.close()
         return clean_text("\n\n".join(pages))
     except Exception as e:
-        print(f"  PDF 파싱 실패: {e}")
+        logger.warning(f"PDF 파싱 실패: {e}")
         return ""
 
 
@@ -167,7 +171,7 @@ class KnowledgeRAG:
     @property
     def model(self) -> SentenceTransformer:
         if self._model is None:
-            print(f"임베딩 모델 로딩: {MODEL_NAME}")
+            logger.info(f"임베딩 모델 로딩: {MODEL_NAME}")
             self._model = SentenceTransformer(MODEL_NAME)
         return self._model
 
@@ -196,24 +200,24 @@ class KnowledgeRAG:
         # 첫 번째 청크가 이미 존재하면 스킵 (이미 인덱싱됨)
         existing = self.collection.get(ids=[f"{paper_id}_chunk_000"])
         if existing["ids"]:
-            print(f"  이미 인덱싱됨: {paper_id}")
+            logger.debug(f"이미 인덱싱됨: {paper_id}")
             return 0
 
-        print(f"  PMC XML 수집 중: {pmc_id}")
+        logger.info(f"PMC XML 수집 중: {pmc_id}")
         try:
             text = fetch_pmc_xml(pmc_id)
         except Exception as e:
-            print(f"  PMC XML 수집 실패: {e}")
+            logger.warning(f"PMC XML 수집 실패: {e}")
             return 0
 
         if not text:
-            print(f"  텍스트 없음: {pmc_id}")
+            logger.warning(f"텍스트 없음: {pmc_id}")
             return 0
 
-        print(f"  텍스트 추출: {len(text)}자")
+        logger.debug(f"텍스트 추출: {len(text)}자")
 
         chunks = chunk_text(text)
-        print(f"  청킹 완료: {len(chunks)}개 청크")
+        logger.debug(f"청킹 완료: {len(chunks)}개 청크")
 
         saved = 0
         for i, chunk in enumerate(chunks):
@@ -238,7 +242,7 @@ class KnowledgeRAG:
             )
             saved += 1
 
-        print(f"  저장 완료: {saved}개 청크 → ChromaDB({COLLECTION_NAME})")
+        logger.info(f"저장 완료: {saved}개 청크 → ChromaDB({COLLECTION_NAME})")
         return saved
 
     def add_paper(
@@ -254,22 +258,22 @@ class KnowledgeRAG:
         """
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
-            print(f"  파일 없음: {pdf_path}")
+            logger.warning(f"파일 없음: {pdf_path}")
             return 0
 
         # PDF 판별
         if not is_digital_pdf(pdf_path):
-            print(f"  스캔 PDF (OCR 미구현): {pdf_path.name}")
+            logger.warning(f"스캔 PDF (OCR 미구현): {pdf_path.name}")
             return 0
 
         # 텍스트 추출 및 정제
         raw_text = extract_text_from_pdf(pdf_path)
         text = clean_text(raw_text)
-        print(f"  텍스트 추출: {len(text)}자")
+        logger.debug(f"텍스트 추출: {len(text)}자")
 
         # 청킹
         chunks = chunk_text(text)
-        print(f"  청킹 완료: {len(chunks)}개 청크")
+        logger.debug(f"청킹 완료: {len(chunks)}개 청크")
 
         # 임베딩 및 저장
         saved = 0
@@ -295,7 +299,7 @@ class KnowledgeRAG:
             )
             saved += 1
 
-        print(f"  저장 완료: {saved}개 청크 → ChromaDB({COLLECTION_NAME})")
+        logger.info(f"저장 완료: {saved}개 청크 → ChromaDB({COLLECTION_NAME})")
         return saved
 
     def search(

@@ -13,6 +13,7 @@ import httpx
 import re
 from datetime import datetime, timedelta
 
+from app.core.logger import get_logger
 from app.models.database import (
     get_active_goals, get_training_zones, get_zone_for_heartrate,
     get_monthly_activities, save_monthly_report,
@@ -83,7 +84,7 @@ async def generate_monthly_report(user_id: int = 1, year_month: str = None) -> d
 
     activities = get_monthly_activities(year_month, user_id)
     if not activities:
-        print(f"{year_month} 운동 기록 없음")
+        logger.info(f"{year_month} 운동 기록 없음")
         return None
 
     zones = get_training_zones(user_id)
@@ -166,7 +167,7 @@ async def generate_monthly_report(user_id: int = 1, year_month: str = None) -> d
         )
 
     if resp.status_code != 200:
-        print(f"월간 리포트 Ollama 에러: {resp.status_code}")
+        logger.error(f"월간 리포트 Ollama 에러: {resp.status_code}")
         return None
 
     raw = resp.json().get("response", "")

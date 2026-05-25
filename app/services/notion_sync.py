@@ -19,7 +19,10 @@ import httpx
 from datetime import datetime
 
 import app.config as config
+from app.core.logger import get_logger
 from app.models.database import upsert_goal, save_profile
+
+logger = get_logger(__name__)
 
 
 NOTION_API = "https://api.notion.com/v1"
@@ -80,7 +83,7 @@ async def sync_goals_from_notion(user_id: int = 1) -> int:
     반환: 동기화된 목표 수
     """
     if not config.NOTION_GOALS_DB_ID:
-        print("NOTION_GOALS_DB_ID 미설정 → 목표 동기화 스킵")
+        logger.warning("NOTION_GOALS_DB_ID 미설정 → 목표 동기화 스킵")
         return 0
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -91,7 +94,7 @@ async def sync_goals_from_notion(user_id: int = 1) -> int:
         )
 
     if resp.status_code != 200:
-        print(f"Notion Goals 조회 실패: {resp.status_code} {resp.text[:200]}")
+        logger.error(f"Notion Goals 조회 실패: {resp.status_code} {resp.text[:200]}")
         return 0
 
     pages = resp.json().get("results", [])
@@ -131,10 +134,10 @@ async def sync_goals_from_notion(user_id: int = 1) -> int:
             )
             synced += 1
         except Exception as e:
-            print(f"목표 파싱 실패: {e}")
+            logger.warning(f"목표 파싱 실패: {e}")
             continue
 
-    print(f"Notion 목표 동기화 완료: {synced}개")
+    logger.info(f"Notion 목표 동기화 완료: {synced}개")
     return synced
 
 
@@ -143,7 +146,7 @@ async def sync_profile_from_notion(user_id: int = 1) -> bool:
     Notion Profile DB의 최신 체중/키 → 로컬 profile 테이블 저장
     """
     if not config.NOTION_PROFILE_DB_ID:
-        print("NOTION_PROFILE_DB_ID 미설정 → 프로필 동기화 스킵")
+        logger.warning("NOTION_PROFILE_DB_ID 미설정 → 프로필 동기화 스킵")
         return False
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -154,7 +157,7 @@ async def sync_profile_from_notion(user_id: int = 1) -> bool:
         )
 
     if resp.status_code != 200:
-        print(f"Notion Profile 조회 실패: {resp.status_code}")
+        logger.error(f"Notion Profile 조회 실패: {resp.status_code}")
         return False
 
     pages = resp.json().get("results", [])
@@ -167,7 +170,7 @@ async def sync_profile_from_notion(user_id: int = 1) -> bool:
 
     if weight_kg:
         save_profile(user_id=user_id, weight_kg=weight_kg, height_cm=height_cm)
-        print(f"Notion 프로필 동기화 완료: {weight_kg}kg")
+        logger.info(f"Notion 프로필 동기화 완료: {weight_kg}kg")
         return True
 
     return False

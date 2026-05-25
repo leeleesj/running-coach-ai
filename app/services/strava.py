@@ -2,9 +2,12 @@ import httpx
 import time
 from datetime import datetime, timedelta
 
+from app.core.logger import get_logger
 from app.models.activity import ActivityData, SplitData
 from app.models.database import get_user, update_tokens
 import app.config as config
+
+logger = get_logger(__name__)
 
 
 async def refresh_access_token(athlete_id: int) -> str | None:
@@ -14,15 +17,15 @@ async def refresh_access_token(athlete_id: int) -> str | None:
     """
     user = get_user(athlete_id)
     if not user:
-        print(f"유저 없음: {athlete_id}")
+        logger.warning(f"유저 없음: {athlete_id}")
         return None
 
     # 만료 10분 전부터 갱신 (600초)
     if user["token_expires_at"] > time.time() + 600:
-        print("토큰 아직 유효함, 갱신 불필요")
+        logger.debug("토큰 아직 유효함, 갱신 불필요")
         return user["access_token"]
 
-    print("토큰 만료 임박, 갱신 시작...")
+    logger.info("토큰 만료 임박, 갱신 시작...")
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -36,7 +39,7 @@ async def refresh_access_token(athlete_id: int) -> str | None:
         )
 
     if response.status_code != 200:
-        print(f"토큰 갱신 실패: {response.status_code}")
+        logger.error(f"토큰 갱신 실패: {response.status_code}")
         return None
 
     token_data = response.json()
@@ -66,7 +69,7 @@ async def get_activity(activity_id: int, athlete_id: int) -> dict:
         )
 
     if response.status_code != 200:
-        print(f"Strava API 에러: {response.status_code} {response.text}")
+        logger.error(f"Strava API 에러: {response.status_code} {response.text}")
         return {}
 
     return response.json()
@@ -98,7 +101,7 @@ async def get_weekly_activities(athlete_id: int) -> list:
         )
 
     if response.status_code != 200:
-        print(f"Strava API 에러: {response.status_code} {response.text}")
+        logger.error(f"Strava API 에러: {response.status_code} {response.text}")
         return []
 
     return response.json()
@@ -130,7 +133,7 @@ async def get_all_activities(athlete_id: int, per_page: int = 200) -> list:
             )
 
             if response.status_code != 200:
-                print(f"Strava API 에러: {response.status_code} {response.text}")
+                logger.error(f"Strava API 에러: {response.status_code} {response.text}")
                 break
 
             activities = response.json()
@@ -138,7 +141,7 @@ async def get_all_activities(athlete_id: int, per_page: int = 200) -> list:
                 break
 
             all_activities.extend(activities)
-            print(f"페이지 {page}: {len(activities)}개 활동 가져옴 (누적: {len(all_activities)}개)")
+            logger.debug(f"페이지 {page}: {len(activities)}개 활동 가져옴 (누적: {len(all_activities)}개)")
 
             if len(activities) < per_page:
                 break
@@ -148,7 +151,7 @@ async def get_all_activities(athlete_id: int, per_page: int = 200) -> list:
     # 과거→최신 순서로 뒤집기 (시계열 저장)
     all_activities.reverse()
 
-    print(f"전체 활동 {len(all_activities)}개 가져오기 완료!")
+    logger.info(f"전체 활동 {len(all_activities)}개 가져오기 완료!")
     return all_activities
 
 
