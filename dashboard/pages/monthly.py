@@ -151,6 +151,13 @@ if report:
                 f"<b>🎯 목표 진행 상황</b><br><br>{goal_prog}",
                 border="green"
             ), unsafe_allow_html=True)
+
+    next_focus = report.get("next_month_focus", "")
+    if next_focus:
+        st.markdown(card(
+            f"<b>➡️ 다음 달 핵심 포인트</b><br><br>{next_focus}",
+            border="yellow"
+        ), unsafe_allow_html=True)
 else:
     st.markdown(
         card('<div class="kr-sub">📌 월간 리포트가 없습니다. (매월 1일 자동 생성)</div>'),

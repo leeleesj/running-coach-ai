@@ -31,8 +31,14 @@ def vdot_trend_chart(history: list[dict]) -> go.Figure:
     if not history:
         return go.Figure()
 
-    labels = [h["week_start"][5:] for h in history]  # MM-DD
-    values = [h["vdot"] for h in history if h.get("vdot")]
+    # vdot 값이 있는 항목만 (labels와 values 길이 일치)
+    filtered = [(h["week_start"], h["vdot"]) for h in history if h.get("vdot")]
+    if not filtered:
+        return go.Figure()
+
+    # "YYYY-MM-DD" 그대로 사용 → Plotly가 날짜 축으로 올바르게 파싱
+    labels = [ws for ws, _ in filtered]
+    values = [v for _, v in filtered]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -46,6 +52,8 @@ def vdot_trend_chart(history: list[dict]) -> go.Figure:
     ))
     layout = _base_layout("VDOT 추이", height=220)
     layout["yaxis"]["title"] = "VDOT"
+    layout["xaxis"]["type"] = "date"
+    layout["xaxis"]["tickformat"] = "%y/%m"  # 25/09, 25/10 형식
     fig.update_layout(**layout)
     return fig
 
@@ -151,11 +159,11 @@ def pace_trend_chart(activities: list[dict]) -> go.Figure:
     if not activities:
         return go.Figure()
 
-    labels = [a["date"][:10][5:] for a in activities]
-    paces  = [round(a["avg_pace_sec"] / 60, 2) for a in activities if a.get("avg_pace_sec")]
-
-    if not paces:
+    filtered = [(a["date"][:10], round(a["avg_pace_sec"] / 60, 2)) for a in activities if a.get("avg_pace_sec")]
+    if not filtered:
         return go.Figure()
+    labels = [d for d, _ in filtered]
+    paces  = [p for _, p in filtered]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -171,6 +179,8 @@ def pace_trend_chart(activities: list[dict]) -> go.Figure:
     layout["yaxis"]["autorange"] = "reversed"
     layout["yaxis"]["title"] = "분/km (낮을수록 빠름)"
     layout["yaxis"]["tickformat"] = ".2f"
+    layout["xaxis"]["type"] = "date"
+    layout["xaxis"]["tickformat"] = "%y/%m/%d"
     fig.update_layout(**layout)
     return fig
 
@@ -180,7 +190,7 @@ def hr_trend_chart(activities: list[dict], zones: dict) -> go.Figure:
     if not activities:
         return go.Figure()
 
-    labels = [a["date"][:10][5:] for a in activities]
+    labels = [a["date"][:10] for a in activities]
     hrs    = [a.get("avg_heartrate") for a in activities]
 
     z2 = zones.get("zone2_max", 150)
@@ -208,6 +218,8 @@ def hr_trend_chart(activities: list[dict], zones: dict) -> go.Figure:
     ))
     layout = _base_layout("심박 트렌드", height=240)
     layout["yaxis"]["title"] = "bpm"
+    layout["xaxis"]["type"] = "date"
+    layout["xaxis"]["tickformat"] = "%y/%m/%d"
     valid = [h for h in hrs if h]
     if valid:
         layout["yaxis"]["range"] = [min(valid) - 10, max(valid) + 10]
