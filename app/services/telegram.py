@@ -63,12 +63,12 @@ def format_activity_message(activity: "ActivityData", weather: dict = None) -> s
     else:
         hr_comment = "🔥 고강도"
 
-    # PR 여부
+    # PR 여부 (Strava similar_activities 기준 — 비슷한 거리/경로 중 페이스 순위)
     pr_text = ""
     if activity.pr_rank == 1:
-        pr_text = "\n🏆 역대 최고 페이스!"
-    elif activity.pr_rank:
-        pr_text = f"\n🥈 기록 순위 {activity.pr_rank}위"
+        pr_text = "\n🏆 동일 거리 역대 최고 페이스!"
+    elif activity.pr_rank and activity.pr_rank <= 3:
+        pr_text = f"\n🥈 동일 거리 역대 {activity.pr_rank}위 페이스"
 
     # 속도 트렌드
     trend_text = ""
@@ -161,42 +161,37 @@ def format_analysis_message(
     """
     # RAG 비교 섹션
     rag_text = _format_rag_comparison(rag_comparison or [])
-    rag_section = f"\n\n📊 <b>성장 기록</b>\n{rag_text}" if rag_text else ""
+    rag_section = f"\n\n📊 <b>과거 비교</b>\n{rag_text}" if rag_text else ""
 
     # 계획 vs 실제 섹션
     plan_vs_actual = analysis.get("plan_vs_actual")
     plan_section = ""
-    if planned_session and planned_session.get("type", "휴식") != "휴식":
-        plan_section = f"\n\n📋 <b>계획 vs 실제</b>\n{plan_vs_actual or '-'}"
+    if planned_session and planned_session.get("type", "휴식") != "휴식" and plan_vs_actual:
+        plan_section = f"\n\n📋 <b>계획 vs 실제</b>\n{plan_vs_actual}"
 
-    # 내일 훈련 섹션 (주간 계획 DB 기반)
+    # 내일 훈련 섹션
     tomorrow_section = ""
     if tomorrow_session:
         t_type = tomorrow_session.get("type", "휴식")
         if t_type == "휴식" or tomorrow_session.get("distance_km", 0) == 0:
-            tomorrow_section = "\n\n🏃 <b>내일 계획</b>\n• 휴식"
+            tomorrow_section = "\n\n⏭ <b>내일</b> 휴식"
         else:
             tomorrow_section = (
-                f"\n\n🏃 <b>내일 계획</b>\n"
-                f"• 종류: {t_type}\n"
-                f"• 거리: {tomorrow_session.get('distance_km', '-')}km\n"
-                f"• 페이스: {tomorrow_session.get('pace', '-')}\n"
-                f"• 심박: {tomorrow_session.get('heartrate', '-')}bpm"
+                f"\n\n⏭ <b>내일</b> {t_type} "
+                f"{tomorrow_session.get('distance_km', '-')}km "
+                f"| {tomorrow_session.get('pace', '-')} "
+                f"| {tomorrow_session.get('heartrate', '-')}"
             )
 
-    # 성장 기록 (progress)
     progress = analysis.get("progress")
-    progress_section = f"\n\n📈 <b>성장 기록</b>\n{progress}" if progress else ""
+    progress_section = f"\n\n📈 <b>성장</b>\n{progress}" if progress else ""
 
-    message = f"""🤖 <b>AI 코치 분석</b>
+    sections = [
+        f"📝 {analysis.get('summary', '')}",
+        f"💓 {analysis.get('heartrate_analysis', '')}",
+        f"⚡ {analysis.get('pace_analysis', '')}",
+    ]
+    body = "\n\n".join(s for s in sections if s.strip() not in ["📝 ", "💓 ", "⚡ "])
 
-📝 <b>총평</b>
-{analysis.get('summary', '')}
-
-💓 <b>심박수 분석</b>
-{analysis.get('heartrate_analysis', '')}
-
-⚡ <b>페이스 패턴</b>
-{analysis.get('pace_analysis', '')}{plan_section}{rag_section}{progress_section}{tomorrow_section}"""
-
+    message = f"🤖 <b>코치 분석</b>\n\n{body}{plan_section}{rag_section}{progress_section}{tomorrow_section}"
     return message.strip()

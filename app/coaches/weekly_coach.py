@@ -21,7 +21,6 @@ from app.models.database import (
     get_active_goals, get_training_zones, calculate_acwr,
     save_weekly_plan, get_weekly_plan_by_date, get_current_weekly_plan,
 )
-from app.services.notion_sync import sync_all
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:14b-ctx8k"
@@ -85,10 +84,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
     주간 계획 생성 메인 함수
     반환: { week_start, phase, sessions, total_planned_km, weekly_comment }
     """
-    # 1. Notion 동기화
-    await sync_all(user_id)
-
-    # 2. 목표 + 존 + ACWR 조회
+    # 1. 목표 + 존 + ACWR 조회
     goals = get_active_goals(user_id)
     zones = get_training_zones(user_id)
     acwr_data = calculate_acwr(user_id)
@@ -123,7 +119,7 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
     vdot_value = None
     paces = {}
     if primary_goal:
-        from app.utils.vdot import calc_vdot_from_goal, format_vdot_summary, get_training_paces, _fmt_pace
+        from app.utils.vdot import calc_vdot_from_goal, format_vdot_summary, get_training_paces
         pb_sec = primary_goal.get("pb_time_sec") or primary_goal.get("target_time_sec", 0)
         vdot_value = calc_vdot_from_goal(
             primary_goal.get("event_type", ""),
@@ -138,15 +134,16 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
             ) + "\n"
 
     # 8. Qwen 프롬프트 생성
-    # 부상 시 강제 제약 텍스트
+    # 부상 시 제약 텍스트 (LLM이 자연어로 판단)
     injury_block = ""
     if injury_notes:
         injury_block = f"""
 ⛔ 부상 주의 (최우선 적용)
 - 부상 상태: {injury_notes}
-- 위 부상 메모를 반드시 최우선으로 반영할 것
-- 부상 부위에 부담을 주는 훈련종류(인터벌/템포런/LSD)는 절대 포함 금지
-- 허용 훈련종류: 존2 조깅 / 회복 조깅 / 휴식 만 사용
+- 부상 메모를 읽고 훈련 가능 수준을 스스로 판단할 것
+- 뛰지 말아야 할 상황(골절/수술/완전 휴식 등)이면 모든 세션을 휴식으로 설정
+- 가볍게 뛸 수 있는 상황이면 존2 조깅 / 회복 조깅 / 휴식만 사용
+- 어떤 경우에도 인터벌 / 템포런 / LSD는 포함 금지
 - total_planned_km는 반드시 {max_km}km 이하로 제한
 """
 
@@ -237,22 +234,6 @@ async def generate_weekly_plan(user_id: int = 1) -> dict | None:
                      for i, key in enumerate(DAY_KEY)}
     if vdot_value:
         plan["vdot"] = vdot_value
-
-    # 부상 시 강제 후처리 (LLM 무시 방지)
-    if injury_notes:
-        FORBIDDEN = {"인터벌", "템포런", "LSD"}
-        easy_pace = (
-            f"{_fmt_pace(paces['E']['pace_sec_fast'])}~{_fmt_pace(paces['E']['pace_sec_slow'])}"
-            if paces.get("E")
-            else "7:00~8:30/km"
-        )
-        for key, session in plan.get("sessions", {}).items():
-            if session.get("type") in FORBIDDEN:
-                session["type"] = "존2 조깅"
-                session["pace"] = easy_pace
-                session["heartrate"] = f"{zones['zone1_max']+1}~{zones['zone2_max']}bpm"
-                session["notes"] = f"[부상 조정] {session.get('notes', '')}"
-        logger.info("부상 후처리 완료: 인터벌/템포런/LSD → 존2 조깅 치환")
 
     # max_km 상한 항상 강제 (부상 여부 무관)
     total = sum(s.get("distance_km", 0) for s in plan.get("sessions", {}).values())

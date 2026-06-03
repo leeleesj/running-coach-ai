@@ -14,6 +14,8 @@ import re
 from datetime import datetime, timedelta
 
 from app.core.logger import get_logger
+logger = get_logger(__name__)
+
 from app.models.database import (
     get_active_goals, get_training_zones, get_zone_for_heartrate,
     get_monthly_activities, save_monthly_report,
@@ -188,6 +190,7 @@ async def generate_monthly_report(user_id: int = 1, year_month: str = None) -> d
         zone_distribution=json.dumps(zone_dist, ensure_ascii=False),
         fitness_assessment=analysis.get("fitness_assessment", ""),
         goal_progress=analysis.get("goal_progress", ""),
+        next_month_focus=analysis.get("next_month_focus", ""),
     )
 
     return {

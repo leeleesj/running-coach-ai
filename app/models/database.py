@@ -223,6 +223,14 @@ def init_db():
         except Exception:
             pass
 
+    # 마이그레이션: 기존 DB에 없는 컬럼 추가
+    try:
+        cursor.execute("ALTER TABLE monthly_reports ADD COLUMN next_month_focus TEXT")
+        conn.commit()
+        logger.info("마이그레이션: monthly_reports.next_month_focus 컬럼 추가")
+    except Exception:
+        pass  # 이미 존재하면 무시
+
     conn.commit()
     conn.close()
     logger.info("DB 초기화 완료!")
@@ -373,6 +381,48 @@ def save_activity(parsed: "ActivityData", user_id: int = 1) -> int:
 
     logger.info(f"DB 저장 완료! db_id={activity_db_id}")
     return activity_db_id
+
+
+def update_activity_analysis(activity_db_id: int, analysis_dict: dict) -> None:
+    """LLM 분석 결과를 activities.ai_analysis_json에 저장"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE activities SET ai_analysis_json = ? WHERE id = ?",
+        (json.dumps(analysis_dict, ensure_ascii=False), activity_db_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def classify_training_type(avg_heartrate: float, distance_km: float, zones: dict) -> str:
+    """심박/거리 기반 훈련 종류 자동 분류"""
+    if not avg_heartrate:
+        return "러닝"
+    z1 = zones["zone1_max"]
+    z2 = zones["zone2_max"]
+    z3 = zones["zone3_max"]
+
+    if avg_heartrate <= z1:
+        return "회복 조깅"
+    elif avg_heartrate <= z2:
+        return "LSD" if distance_km >= 15 else "존2 조깅"
+    elif avg_heartrate <= z3:
+        return "템포런"
+    else:
+        return "인터벌"
+
+
+def update_activity_training_type(activity_db_id: int, training_type: str) -> None:
+    """activities.training_type 업데이트"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE activities SET training_type = ? WHERE id = ?",
+        (training_type, activity_db_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 def save_splits(activity_db_id: int, splits: list) -> None:
@@ -666,14 +716,15 @@ def calculate_acwr(user_id: int = 1) -> dict:
 def save_monthly_report(user_id: int, year_month: str, total_km: float,
                         total_sessions: int, adherence_rate: float,
                         zone_distribution: str, fitness_assessment: str,
-                        goal_progress: str, notion_page_id: str = None) -> int:
+                        goal_progress: str, next_month_focus: str = "",
+                        notion_page_id: str = None) -> int:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO monthly_reports (
             user_id, year_month, total_km, total_sessions, adherence_rate,
-            zone_distribution, fitness_assessment, goal_progress, notion_page_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            zone_distribution, fitness_assessment, goal_progress, next_month_focus, notion_page_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(year_month) DO UPDATE SET
             total_km = excluded.total_km,
             total_sessions = excluded.total_sessions,
@@ -681,9 +732,10 @@ def save_monthly_report(user_id: int, year_month: str, total_km: float,
             zone_distribution = excluded.zone_distribution,
             fitness_assessment = excluded.fitness_assessment,
             goal_progress = excluded.goal_progress,
+            next_month_focus = excluded.next_month_focus,
             generated_at = datetime('now')
     """, (user_id, year_month, total_km, total_sessions, adherence_rate,
-          zone_distribution, fitness_assessment, goal_progress, notion_page_id))
+          zone_distribution, fitness_assessment, goal_progress, next_month_focus, notion_page_id))
     conn.commit()
     report_id = cursor.lastrowid
     conn.close()
@@ -704,32 +756,6 @@ def get_monthly_activities(year_month: str, user_id: int = 1) -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
-
-# ── Profile ──────────────────────────────────────────────────────────────────
-
-def save_profile(user_id: int, weight_kg: float, height_cm: float = None) -> None:
-    """신체 정보 기록 (히스토리 누적)"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO profile (user_id, height_cm, weight_kg) VALUES (?, ?, ?)",
-        (user_id, height_cm, weight_kg)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_latest_profile(user_id: int = 1) -> dict | None:
-    """가장 최근 신체 정보 반환"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM profile WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1",
-        (user_id,)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
 
 
 def is_already_processed(strava_id: int) -> bool:

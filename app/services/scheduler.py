@@ -2,8 +2,8 @@
 APScheduler 기반 크론 스케줄러
 
 등록된 작업:
-  - 매주 월요일 07:00 → 주간 코치 (계획 생성 + Notion + 텔레그램)
-  - 매월 1일 08:00  → 월간 코치 (리포트 + Notion + 텔레그램)
+  - 매주 월요일 07:00 → 주간 코치 (계획 생성 + 텔레그램)
+  - 매월 1일 08:00  → 월간 코치 (리포트 + 텔레그램)
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -29,12 +29,10 @@ async def _run_weekly_coach():
 
         # 2. 주간 계획 생성
         from app.coaches.weekly_coach import generate_weekly_plan, format_weekly_plan_message
-        from app.services.notion import post_weekly_plan
         from app.services.telegram import send_message
 
         plan = await generate_weekly_plan(user_id=1)
         if plan:
-            await post_weekly_plan(plan)
             msg = format_weekly_plan_message(plan)
             await send_message(msg)
             logger.info("[스케줄러] 주간 코치 완료")
@@ -51,14 +49,10 @@ async def _run_monthly_coach():
     logger.info("[스케줄러] 월간 코치 시작")
     try:
         from app.coaches.monthly_coach import generate_monthly_report, format_monthly_report_message
-        from app.services.notion import post_monthly_report
         from app.services.telegram import send_message
 
         report = await generate_monthly_report(user_id=1)
         if report:
-            # Notion 기록
-            await post_monthly_report(report)
-            # 텔레그램 발송
             msg = format_monthly_report_message(report)
             await send_message(msg)
             logger.info("[스케줄러] 월간 코치 완료")
@@ -70,14 +64,35 @@ async def _run_monthly_coach():
         traceback.print_exc()
 
 
+async def _startup_catchup():
+    """
+    서버 시작 시 이번 주 계획이 없으면 자동 생성.
+    --reload로 인한 재시작이나 서버 다운 후 복구 시 보완.
+    """
+    from datetime import datetime, timedelta
+    from app.models.database import get_weekly_plan_by_date
+
+    now = datetime.now()
+    monday = now - timedelta(days=now.weekday())
+    week_start = monday.strftime("%Y-%m-%d")
+
+    existing = get_weekly_plan_by_date(week_start)
+    if not existing or not existing.get("plan_json"):
+        logger.info(f"[시작 보완] 이번 주 계획 없음 ({week_start}) → 자동 생성 시작")
+        await _run_weekly_coach()
+    else:
+        logger.info(f"[시작 보완] 이번 주 계획 확인됨 ({week_start}), 스킵")
+
+
 def start_scheduler():
     """FastAPI 시작 시 호출"""
-    # 매주 월요일 07:00 (KST)
+    # 매주 월요일 07:00 (KST) — misfire_grace_time: 재시작 후 1시간 이내면 놓친 job 실행
     scheduler.add_job(
         _run_weekly_coach,
         trigger=CronTrigger(day_of_week="mon", hour=7, minute=0, timezone=KST),
         id="weekly_coach",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
     # 매월 1일 08:00 (KST)
     scheduler.add_job(
@@ -85,6 +100,7 @@ def start_scheduler():
         trigger=CronTrigger(day=1, hour=8, minute=0, timezone=KST),
         id="monthly_coach",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.start()
     logger.info("스케줄러 시작: 주간 코치(월 07:00), 월간 코치(1일 08:00)")

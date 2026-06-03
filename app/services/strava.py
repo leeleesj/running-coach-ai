@@ -217,8 +217,14 @@ def parse_activity(raw: dict) -> ActivityData:
         date_display = start_date_str
 
     # km별 구간 분석 (splits_metric)
+    # 마지막 partial split (500m 미만) 제외 — 이상한 페이스 방지
     splits = []
-    for s in raw.get("splits_metric", []):
+    raw_splits = raw.get("splits_metric", [])
+    for i, s in enumerate(raw_splits):
+        distance_m = s.get("distance", 0)
+        is_last = (i == len(raw_splits) - 1)
+        if is_last and distance_m < 500:
+            continue
         split_speed = s.get("average_speed", 0)
         grade_adjusted_speed = s.get("average_grade_adjusted_speed", 0)
         splits.append({
@@ -228,7 +234,7 @@ def parse_activity(raw: dict) -> ActivityData:
             "avg_grade_adjusted_pace_sec": speed_to_pace_sec(grade_adjusted_speed),
             "avg_heartrate": round(s.get("average_heartrate", 0), 1),
             "moving_time": seconds_to_time(s.get("moving_time", 0)),
-            "distance_m": round(s.get("distance", 0), 1),
+            "distance_m": round(distance_m, 1),
             "elevation_diff": s.get("elevation_difference", 0),
             "pace_zone": s.get("pace_zone"),
         })

@@ -23,23 +23,6 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 WEATHER_NX = os.getenv("WEATHER_NX", "59")
 WEATHER_NY = os.getenv("WEATHER_NY", "124")
 
-NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-
-# Notion 데이터베이스 ID (Phase 1 코칭 시스템)
-NOTION_GOALS_DB_ID = os.getenv("NOTION_GOALS_DB_ID")           # 목표 설정 DB
-NOTION_PROFILE_DB_ID = os.getenv("NOTION_PROFILE_DB_ID")       # 체중/신체 정보 DB
-NOTION_TRAINING_LOG_DB_ID = os.getenv("NOTION_TRAINING_LOG_DB_ID")  # 훈련 일지 DB
-NOTION_WEEKLY_PLAN_DB_ID = os.getenv("NOTION_WEEKLY_PLAN_DB_ID")    # 주간 계획 DB
-NOTION_MONTHLY_REPORT_DB_ID = os.getenv("NOTION_MONTHLY_REPORT_DB_ID")  # 월간 리포트 DB
-
-# 필수 값 없으면 서버 시작 시 바로 에러
-# Notion 코칭 DB는 선택값 (없으면 Notion 연동 스킵)
-NOTION_COACHING_ENABLED = all([
-    NOTION_GOALS_DB_ID,
-    NOTION_TRAINING_LOG_DB_ID,
-    NOTION_WEEKLY_PLAN_DB_ID,
-])
-
 required = {
     "STRAVA_CLIENT_ID": STRAVA_CLIENT_ID,
     "STRAVA_CLIENT_SECRET": STRAVA_CLIENT_SECRET,
@@ -51,7 +34,6 @@ required = {
     "STRAVA_REFRESH_TOKEN": STRAVA_REFRESH_TOKEN,
     "STRAVA_ATHLETE_ID": STRAVA_ATHLETE_ID,
     "WEATHER_API_KEY": WEATHER_API_KEY,
-    "NOTION_API_KEY": NOTION_API_KEY,
 }
 
 for key, value in required.items():

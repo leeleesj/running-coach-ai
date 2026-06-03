@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 from app.ai.local_llm import analyze_activity, parse_llm_response
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
-from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed
+from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed, get_active_goals, update_activity_analysis, classify_training_type, update_activity_training_type, get_training_zones
 from app.services.telegram import send_message, format_activity_message, format_analysis_message
 from app.services.scheduler import start_scheduler, stop_scheduler
 
@@ -23,6 +23,9 @@ async def lifespan(app: FastAPI):
     """FastAPI 라이프사이클 관리"""
     init_db()
     start_scheduler()
+    # 서버 시작 시 이번 주 계획 누락 여부 확인 및 보완
+    from app.services.scheduler import _startup_catchup
+    asyncio.create_task(_startup_catchup())
     yield
     stop_scheduler()
 
@@ -182,6 +185,11 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         try:
             activity_db_id = save_activity(activity)
             save_splits(activity_db_id, activity.splits)
+            # 심박/거리 기반 훈련 종류 자동 분류
+            zones = get_training_zones(user_id=1)
+            t_type = classify_training_type(activity.avg_heartrate, activity.distance_km, zones)
+            update_activity_training_type(activity_db_id, t_type)
+            logger.info(f"훈련 종류 분류: {t_type}")
         except Exception as e:
             logger.error(f"DB 저장 실패 (계속 진행): {e}")
             await send_message(f"⚠️ DB 저장 실패: {str(e)}")
@@ -225,6 +233,13 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
         except Exception as e:
             logger.warning(f"주간 계획 조회 실패 (무시하고 계속): {e}")
 
+        # 5-3. 목표 조회 (LLM 분석 컨텍스트용)
+        goals = []
+        try:
+            goals = get_active_goals(user_id=1)
+        except Exception as e:
+            logger.warning(f"목표 조회 실패 (무시하고 계속): {e}")
+
         # 6. 첫 번째 메시지: 운동 요약 즉시 전송
         try:
             summary_message = format_activity_message(activity, weather)
@@ -240,36 +255,14 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
                 activity, weekly, weather, hr_correction,
                 activity_db_id=activity_db_id,
                 planned_session=planned_session,
+                goals=goals,
             )
             analysis_dict = parse_llm_response(analysis_text)
+            if analysis_dict and activity_db_id:
+                update_activity_analysis(activity_db_id, analysis_dict)
+                logger.info("LLM 분석 결과 DB 저장 완료")
         except Exception as e:
             logger.error(f"LLM 분석 실패: {e}")
-
-        # 7-1. Notion 훈련 일지 기록 (분석 완료 후)
-        ai_comment = ""
-        if analysis_dict:
-            ai_comment = analysis_dict.get("summary", "")
-        try:
-            from app.services.notion import post_training_log
-            await post_training_log(
-                activity={
-                    "date": activity.date,
-                    "name": activity.name,
-                    "strava_id": activity.id,
-                    "distance_km": activity.distance_km,
-                    "avg_heartrate": activity.avg_heartrate,
-                    "max_heartrate": activity.max_heartrate,
-                    "avg_pace_sec": activity.avg_pace_sec,
-                    "avg_cadence": activity.avg_cadence,
-                    "elevation_gain": activity.elevation_gain,
-                    "calories": activity.calories,
-                    "training_type": activity.training_type,
-                },
-                planned_session=planned_session,
-                ai_comment=ai_comment,
-            )
-        except Exception as e:
-            logger.warning(f"Notion 훈련 일지 기록 실패 (무시하고 계속): {e}")
 
         # 8. 두 번째 메시지: AI 분석 전송
         try:

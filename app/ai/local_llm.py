@@ -1,7 +1,7 @@
 import httpx
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from app.core.logger import get_logger
@@ -110,6 +110,7 @@ async def analyze_activity(
     hr_correction: dict = None,
     activity_db_id: int = None,
     planned_session: dict = None,
+    goals: list = None,
 ) -> str:
     """
     운동 데이터를 로컬 LLM(Qwen)으로 분석
@@ -207,6 +208,26 @@ async def analyze_activity(
         rag_parts.append(knowledge_context)
     rag_section = "\n" + "\n\n".join(rag_parts) + "\n" if rag_parts else ""
 
+    # 목표/부상 컨텍스트
+    goal_section = ""
+    if goals:
+        primary = next((g for g in goals if g["priority"] == "primary"), None)
+        if primary:
+            sec = primary.get("target_time_sec", 0)
+            h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+            time_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+            days_left = ""
+            if primary.get("target_date"):
+                from datetime import datetime
+                dt = datetime.fromisoformat(primary["target_date"])
+                days_left = f" (D-{(dt - datetime.now()).days})"
+            injury = f"\n- 부상 상태: {primary['injury_notes']}" if primary.get("injury_notes") else ""
+            goal_section = f"""
+## 훈련 목표 및 현재 상태
+- 목표: {primary['event_type']} {time_str}{days_left}
+- 주당 훈련 가능: {primary.get('weekly_days_available', 4)}일 / 최대 {primary.get('max_weekly_km', 30)}km{injury}
+"""
+
     # 오늘 계획 세션 텍스트 (있을 때만)
     plan_section = ""
     if planned_session and planned_session.get("type", "휴식") != "휴식":
@@ -221,7 +242,7 @@ async def analyze_activity(
     prompt = f"""당신은 전문 러닝 코치입니다. 다음 운동 데이터를 분석해주세요.
 {zones_text}
 {terminology_text}
-{rag_section}
+{goal_section}{rag_section}
 ## 오늘 운동 데이터
 - 날짜: {activity.date_display or activity.date}
 - 운동명: {activity.name}
@@ -247,11 +268,11 @@ async def analyze_activity(
 반드시 아래 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트는 절대 포함하지 마세요:
 
 {{
-  "summary": "오늘 운동 총평 (2~3문장, 존 정보 포함)",
-  "heartrate_analysis": "심박수 존 분석 (개인 존 기준으로 정확하게, 2~3문장)",
-  "pace_analysis": "구간별 페이스 패턴 분석 (2~3문장)",
-  "plan_vs_actual": "계획 대비 실제 비교 (계획이 있으면 거리/페이스/심박 차이 언급, 계획 없으면 null)",
-  "progress": "과거 유사 운동과 비교한 오늘의 변화 (위 [과거 유사 운동 데이터]의 수치를 직접 인용할 것. 데이터 없으면 null)"
+  "summary": "오늘 운동 총평. 부상/회복 중이면 그 맥락 반영. 구체적 수치(페이스, 심박) 포함. 3~4문장.",
+  "heartrate_analysis": "개인 심박존 기준으로 오늘 강도 평가. 구간별 심박 변화 언급. 목표 존 대비 실제 존 비교. 3문장.",
+  "pace_analysis": "구간별 페이스 패턴 분석. 후반 페이스 변화, 일관성 평가. 개선 포인트 1가지 포함. 3문장.",
+  "plan_vs_actual": "계획 대비 실제 거리/페이스/심박 수치 차이를 구체적으로 언급. 계획 없으면 null.",
+  "progress": "과거 유사 운동 수치를 직접 인용해서 오늘과 비교. 개선/저하 여부 판단. 데이터 없으면 null."
 }}"""
 
     logger.info(f"Ollama 분석 시작... (모델: {OLLAMA_MODEL})")
@@ -260,86 +281,3 @@ async def analyze_activity(
     return text
 
 
-async def generate_weekly_schedule(
-    activity: "ActivityData",
-    weekly_activities: list,
-    weather: dict = None,
-    hr_correction: dict = None,
-) -> str:
-    """
-    차주 훈련 스케줄 생성
-    개인 훈련존 + 용어 사전 주입
-    """
-
-    goal_date = datetime(2026, 4, 26)
-    today = datetime.now()
-    days_left = (goal_date - today).days
-
-    weekly_distance = sum(a.get("distance", 0) / 1000 for a in weekly_activities)
-    weekly_count = len(weekly_activities)
-
-    # 개인 훈련존
-    zones = get_training_zones()
-    zones_text = build_zones_prompt(zones)
-    terminology_text = build_terminology_prompt()
-
-    next_monday = today + timedelta(days=(7 - today.weekday()))
-    dates = [(next_monday + timedelta(days=i)).strftime("%m/%d (%a)") for i in range(7)]
-    days_kr = ["월", "화", "수", "목", "금", "토", "일"]
-    schedule_dates = [f"{dates[i]} ({days_kr[i]})" for i in range(7)]
-
-    if hasattr(activity, "distance_km"):
-        distance_km = activity.distance_km
-        pace = activity.pace
-        avg_heartrate = activity.avg_heartrate
-    else:
-        distance_km = activity.get("distance_km", 0)
-        pace = activity.get("pace", "N/A")
-        avg_heartrate = activity.get("avg_heartrate", 0)
-
-    adjusted_heartrate = hr_correction.get("adjusted_heartrate", "N/A") if hr_correction else "N/A"
-
-    prompt = f"""당신은 전문 러닝 코치입니다. 다음 주 훈련 스케줄을 작성해주세요.
-{zones_text}
-{terminology_text}
-
-## 오늘 운동
-- 거리: {distance_km}km
-- 페이스: {pace}
-- 평균 심박: {avg_heartrate}bpm
-- 보정 심박: {adjusted_heartrate}bpm
-
-## 이번 주 누적
-- 총 횟수: {weekly_count}회
-- 총 거리: {round(weekly_distance, 2)}km
-
-## 목표
-- 하프마라톤 완주: 4월 26일 (D-{days_left})
-- 존2 훈련 비율 60% 이상 유지
-
-## 다음 주 날짜
-{schedule_dates[0]}
-{schedule_dates[1]}
-{schedule_dates[2]}
-{schedule_dates[3]}
-{schedule_dates[4]}
-{schedule_dates[5]}
-{schedule_dates[6]}
-
-## 요청
-위 날짜에 맞게 다음 주 7일 훈련 스케줄을 작성해주세요.
-각 날짜별로 한 줄: 날짜 | 훈련종류 | 거리 | 목표페이스 | 목표심박
-마크다운 기호(##, **, * 등)는 사용하지 말고 일반 텍스트로만 작성해주세요.
-
-⚠️ 중요 규칙:
-- 존2 조깅 목표 심박은 반드시 {zones['zone1_max']+1}~{zones['zone2_max']}bpm 범위
-- 존2 조깅 페이스는 약 8:30~9:30/km
-- LSD도 존2 심박 유지 ({zones['zone1_max']+1}~{zones['zone2_max']}bpm)
-- 주당 1~2회 휴식 포함
-- 주말에 LSD 배치
-- 총 주간 거리 이번 주 대비 10% 이내 증가"""
-
-    logger.info("Ollama 스케줄 생성 시작...")
-    text = await call_ollama(prompt, max_tokens=800)
-    logger.info("Ollama 스케줄 생성 완료!")
-    return text
