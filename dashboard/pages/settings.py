@@ -206,3 +206,36 @@ st.markdown(card(
     f"존5: {zones['zone4_max']+1}~bpm<br>"
     f"최대 심박: {zones['max_heartrate']}bpm"
 ), unsafe_allow_html=True)
+
+# ── 주간 계획 재생성 ───────────────────────────────────────────────────────────
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown('<div class="kr-section-title">📅 주간 계획</div>', unsafe_allow_html=True)
+st.markdown(
+    "<div class='kr-sub'>목표나 부상 메모 변경 후 이번 주 계획을 즉시 재생성합니다.<br>"
+    "기존 계획은 덮어씁니다.</div>",
+    unsafe_allow_html=True,
+)
+st.markdown("<br>", unsafe_allow_html=True)
+
+if st.button("🔄 이번 주 계획 재생성", type="primary", use_container_width=True):
+    import requests
+    try:
+        # 기존 계획 삭제 후 재생성
+        from app.models.database import get_connection as _gc
+        from datetime import datetime, timedelta
+        _now = datetime.now()
+        _monday = (_now - timedelta(days=_now.weekday())).strftime("%Y-%m-%d")
+        _conn = _gc()
+        _conn.execute("DELETE FROM weekly_plans WHERE week_start = ? AND user_id = 1", (_monday,))
+        _conn.commit()
+        _conn.close()
+
+        with st.spinner("Qwen이 계획을 생성 중입니다... (약 1~2분)"):
+            resp = requests.get("http://localhost:8000/test/weekly-coach", timeout=180)
+        if resp.status_code == 200 and "plan" in resp.json():
+            st.success("✅ 이번 주 계획이 재생성되었습니다!")
+            st.rerun()
+        else:
+            st.error(f"생성 실패: {resp.text[:200]}")
+    except Exception as e:
+        st.error(f"오류: {e}")

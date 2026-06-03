@@ -60,10 +60,14 @@ else:
 
     st.markdown(
         f'{badge(phase_kr, "purple")} '
-        f'{badge(f"목표 {planned_km}km", "gray")} '
-        f'{badge(plan.get("weekly_comment","")[:40], "gray")}',
+        f'{badge(f"목표 {planned_km}km", "gray")}',
         unsafe_allow_html=True,
     )
+    if plan.get("weekly_comment"):
+        st.markdown(
+            f"<div class='kr-sub' style='margin-top:8px'>{plan['weekly_comment']}</div>",
+            unsafe_allow_html=True,
+        )
     st.markdown("<br>", unsafe_allow_html=True)
 
     # 요일별 실제 활동 매핑
@@ -163,9 +167,10 @@ else:
                 ), unsafe_allow_html=True)
 
             # 기본 수치 요약
-            st.markdown(f"""
-            <div class="kr-sub" style="margin-top:8px">
-            거리 {dist}km &nbsp;|&nbsp; 페이스 {pace_str} &nbsp;|&nbsp;
-            심박 {hr_str} &nbsp;|&nbsp; 종류 {act.get('training_type') or '-'}
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='kr-sub' style='margin-top:8px'>"
+                f"거리 {dist}km &nbsp;|&nbsp; 페이스 {pace_str} &nbsp;|&nbsp;"
+                f"심박 {hr_str} &nbsp;|&nbsp; 종류 {act.get('training_type') or '-'}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
