@@ -10,6 +10,8 @@ from app.models.database import get_training_zones, get_zone_for_heartrate
 if TYPE_CHECKING:
     from app.models.activity import ActivityData
 
+logger = get_logger(__name__)
+
 # Ollama 설정
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:14b-ctx8k"
