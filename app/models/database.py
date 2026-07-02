@@ -758,6 +758,20 @@ def get_monthly_activities(year_month: str, user_id: int = 1) -> list[dict]:
 
 
 
+def get_weekly_activities_from_db(user_id: int = 1) -> list[dict]:
+    """이번 주 월요일 이후 운동 목록 반환 (Strava weekly API 대체)"""
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    monday = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT distance_km, avg_heartrate FROM activities WHERE user_id = ? AND date >= ? AND distance_km > 0",
+        (user_id, monday)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def is_already_processed(strava_id: int) -> bool:
     """이미 처리된 활동인지 확인 (중복 처리 방지)"""
     conn = get_connection()

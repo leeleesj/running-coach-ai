@@ -13,7 +13,8 @@ logger = get_logger(__name__)
 from app.ai.local_llm import analyze_activity, parse_llm_response
 from app.services.weather import get_weather, calculate_heartrate_correction
 from app.services.strava import get_activity, get_weekly_activities, parse_activity
-from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed, get_active_goals, update_activity_analysis, classify_training_type, update_activity_training_type, get_training_zones
+from app.models.database import init_db, save_activity, save_splits, save_user, is_already_processed, get_active_goals, update_activity_analysis, classify_training_type, update_activity_training_type, get_training_zones, get_weekly_activities_from_db
+from app.services.apple_health import parse_apple_health
 from app.services.telegram import send_message, format_activity_message, format_analysis_message
 from app.services.scheduler import start_scheduler, stop_scheduler
 
@@ -46,7 +47,7 @@ async def strava_login():
     auth_url = (
         f"https://www.strava.com/oauth/authorize"
         f"?client_id={config.STRAVA_CLIENT_ID}"
-        f"&redirect_uri=https://newport-technology-appreciation-karl.trycloudflare.com/strava/callback"
+        f"&redirect_uri=https://refute-ought-banked.ngrok-free.dev/strava/callback"
         f"&response_type=code"
         f"&scope=activity:read_all"
     )
@@ -95,30 +96,35 @@ async def verify_strava_webhook(
 
 @app.post("/webhook/strava")
 async def receive_strava_event(request: Request, background_tasks: BackgroundTasks):
-    data = await request.json()
-
-    object_type = data.get("object_type")
-    aspect_type = data.get("aspect_type")
-    activity_id = data.get("object_id")
-    athlete_id = data.get("owner_id")
-
-    logger.info(f"Webhook 수신: {object_type} {aspect_type} id={activity_id}")
-
-    if object_type == "activity" and aspect_type in ("create", "update"):
-        # 현재 처리 중인 activity면 스킵
-        if activity_id in processing_ids:
-            logger.info(f"이미 처리 중, 스킵: {activity_id}")
-            return {"status": "EVENT_RECEIVED"}
-
-        # 백그라운드로 처리 (즉시 200 반환)
-        background_tasks.add_task(
-            process_activity,
-            activity_id,
-            athlete_id,
-            aspect_type,
-        )
-
+    # Strava API가 유료 구독자 전용으로 변경됨 (2026-06-30)
+    logger.info("Strava webhook 수신됨 (비활성화 상태)")
     return {"status": "EVENT_RECEIVED"}
+
+
+@app.post("/webhook/apple-health")
+async def receive_apple_health(request: Request, background_tasks: BackgroundTasks):
+    """Apple Health 운동 데이터 수신 (iPhone Shortcuts → FastAPI)"""
+    # 시크릿 토큰 검증
+    token = request.headers.get("X-Apple-Health-Secret", "")
+    if config.APPLE_HEALTH_SECRET and token != config.APPLE_HEALTH_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    data = await request.json()
+    logger.info(f"Apple Health webhook 수신: {data.get('name')} {data.get('distance_m')}m")
+
+    try:
+        activity = parse_apple_health(data)
+    except Exception as e:
+        logger.error(f"Apple Health 파싱 실패: {e}")
+        raise HTTPException(status_code=400, detail=f"파싱 실패: {e}")
+
+    # 중복 방지
+    if is_already_processed(activity.id):
+        logger.info(f"이미 처리된 활동, 스킵: {activity.id}")
+        return {"status": "already_processed"}
+
+    background_tasks.add_task(process_apple_health_activity, activity)
+    return {"status": "ok"}
 
 
 async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
@@ -304,6 +310,144 @@ async def process_activity(activity_id: int, athlete_id: int, aspect_type: str):
     finally:
         await asyncio.sleep(60)
         processing_ids.discard(activity_id)
+
+
+async def process_apple_health_activity(activity: "ActivityData"):
+    """Apple Health 운동 데이터 처리 (Strava 없이)"""
+    try:
+        logger.info(f"Apple Health 운동 처리 시작: {activity.date} {activity.distance_km}km")
+
+        # 1. 날씨 가져오기
+        weather = {}
+        try:
+            weather = await get_weather()
+        except Exception as e:
+            logger.warning(f"날씨 API 실패 (계속 진행): {e}")
+
+        # 2. 심박 보정
+        hr_correction = {}
+        try:
+            if weather:
+                hr_correction = calculate_heartrate_correction(weather)
+                if activity.avg_heartrate and hr_correction.get("correction"):
+                    adjusted_hr = round(activity.avg_heartrate - hr_correction["correction"], 1)
+                    hr_correction["adjusted_heartrate"] = adjusted_hr
+                    activity.avg_heartrate_adjusted = adjusted_hr
+                    activity.hr_correction = hr_correction["correction"]
+                    activity.hr_correction_comment = hr_correction["comment"]
+        except Exception as e:
+            logger.warning(f"심박 보정 실패 (계속 진행): {e}")
+
+        # 3. 이번 주 활동 (DB에서 조회)
+        weekly = []
+        try:
+            weekly = get_weekly_activities_from_db(user_id=1)
+        except Exception as e:
+            logger.warning(f"주간 활동 조회 실패 (계속 진행): {e}")
+
+        # 4. DB 저장
+        activity_db_id = 0
+        try:
+            activity_db_id = save_activity(activity)
+            save_splits(activity_db_id, activity.splits)
+            zones = get_training_zones(user_id=1)
+            t_type = classify_training_type(activity.avg_heartrate, activity.distance_km, zones)
+            update_activity_training_type(activity_db_id, t_type)
+            logger.info(f"DB 저장 완료: id={activity_db_id}, 훈련종류={t_type}")
+        except Exception as e:
+            logger.error(f"DB 저장 실패 (계속 진행): {e}")
+            await send_message(f"⚠️ DB 저장 실패: {str(e)}")
+
+        # 5. Personal RAG
+        rag_comparison = []
+        try:
+            from app.rag.personal_rag import get_personal_rag
+            rag = get_personal_rag()
+            if rag.collection.count() > 0:
+                activity_dict = {
+                    "id": activity_db_id,
+                    "date": activity.date,
+                    "distance_km": activity.distance_km,
+                    "avg_pace_sec": activity.avg_pace_sec,
+                    "avg_heartrate": activity.avg_heartrate,
+                    "max_heartrate": activity.max_heartrate,
+                    "avg_cadence": activity.avg_cadence,
+                    "elevation_gain": activity.elevation_gain,
+                    "calories": activity.calories,
+                }
+                rag_comparison = rag.get_comparison_data(activity_dict)
+                rag.upsert_activity(activity_dict)
+        except Exception as e:
+            logger.warning(f"Personal RAG 업데이트 실패 (무시하고 계속): {e}")
+
+        # 6. 주간 계획 / 목표 조회
+        planned_session = None
+        tomorrow_session = None
+        try:
+            from app.models.database import get_current_weekly_plan
+            from app.coaches.weekly_coach import get_today_planned_session, get_tomorrow_planned_session
+            import json
+            weekly_plan_row = get_current_weekly_plan()
+            if weekly_plan_row and weekly_plan_row.get("plan_json"):
+                weekly_plan = json.loads(weekly_plan_row["plan_json"])
+                planned_session = get_today_planned_session(weekly_plan)
+                tomorrow_session = get_tomorrow_planned_session(weekly_plan)
+        except Exception as e:
+            logger.warning(f"주간 계획 조회 실패 (무시하고 계속): {e}")
+
+        goals = []
+        try:
+            goals = get_active_goals(user_id=1)
+        except Exception as e:
+            logger.warning(f"목표 조회 실패 (무시하고 계속): {e}")
+
+        # 7. 운동 요약 메시지 전송
+        try:
+            summary_message = format_activity_message(activity, weather)
+            await send_message(summary_message)
+        except Exception as e:
+            logger.error(f"운동 요약 전송 실패: {e}")
+
+        # 8. LLM 분석
+        analysis_text = ""
+        analysis_dict = None
+        try:
+            analysis_text = await analyze_activity(
+                activity, weekly, weather, hr_correction,
+                activity_db_id=activity_db_id,
+                planned_session=planned_session,
+                goals=goals,
+            )
+            analysis_dict = parse_llm_response(analysis_text)
+            if analysis_dict and activity_db_id:
+                update_activity_analysis(activity_db_id, analysis_dict)
+                logger.info("LLM 분석 결과 DB 저장 완료")
+        except Exception as e:
+            logger.error(f"LLM 분석 실패: {e}")
+
+        # 9. AI 분석 메시지 전송
+        try:
+            if analysis_dict:
+                analysis_message = format_analysis_message(
+                    analysis_dict,
+                    rag_comparison=rag_comparison,
+                    planned_session=planned_session,
+                    tomorrow_session=tomorrow_session,
+                )
+            else:
+                analysis_message = f"🤖 <b>AI 코치 분석</b>\n{analysis_text}"
+            await send_message(analysis_message)
+        except Exception as e:
+            logger.error(f"AI 분석 전송 실패: {e}")
+
+        logger.info(f"=== Apple Health 운동 분석 완료: {activity.distance_km}km ===")
+
+    except Exception as e:
+        logger.error(f"Apple Health 처리 중 예상치 못한 에러: {e}")
+        try:
+            await send_message(f"⚠️ 운동 처리 중 오류가 발생했어요.\n{str(e)}")
+        except:
+            pass
 
 
 # ── 테스트 엔드포인트 ──────────────────────────
